@@ -5,6 +5,7 @@ import sys
 import time
 import cv2
 import numpy as np
+from camera_connection import prepare_arm_stream
 
 
 def load_calibration(path):
@@ -61,6 +62,8 @@ def run(config):
     dictionary=cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco,config['dictionary']))
     detector=cv2.aruco.ArucoDetector(dictionary,cv2.aruco.DetectorParameters())
     source=config['url'].strip()
+    if config.get('arm_camera_api'):
+        source=prepare_arm_stream(source,status=lambda message:emit({'status':message}))
     if not source.startswith(('http://','https://','rtsp://')):raise ValueError('Introducir URL http(s) o rtsp de la cámara ESP32')
     cap=cv2.VideoCapture(source,cv2.CAP_FFMPEG,[cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,3000,cv2.CAP_PROP_READ_TIMEOUT_MSEC,2000])
     if not cap.isOpened():raise RuntimeError('No se pudo abrir el stream de la ESP32-S3')

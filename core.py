@@ -39,8 +39,11 @@ class Geometry:
 class Odometry:
     def __init__(self): self.reset()
     def reset(self):
+        self.revision=getattr(self,'revision',0)+1
         self.x=self.y=self.yaw=self.enc_yaw=self.left=self.right=self.v=self.imu_yaw=0.0
         self.previous=None;self.last_heading=None;self.imu_valid=False;self.imu_segment=0
+        self.single_left=(0.0,0.0,0.0);self.single_right=(0.0,0.0,0.0)
+        self.spin_active=False
         self.source='ENC';self.imu_reason='Waiting for telemetry';self.prefer_imu=True
         self.imu_delta=0.0;self.imu_rate=0.0;self.dl=self.dr=0.0;self.vl=self.vr=0.0
     @staticmethod
@@ -78,6 +81,16 @@ class Odometry:
         elif self.last_heading is not None or not ok:
             self.imu_segment+=1
         self.last_heading=heading if ok else None
+        if self.imu_valid:
+            imu_da=math.radians(self.imu_delta)
+            # Motor telemetry is in physical output order/polarity. Decode it
+            # before identifying the AGV's commanded in-place rotation.
+            pl=t.get('pl',0)*g.motor_l;pr=t.get('pr',0)*g.motor_r
+            if g.swap_lr:pl,pr=pr,pl
+            if pl or pr:self.spin_active=pl*pr<0
+            # Convert wheel travel to axle-centre travel, including in-place turns.
+            self.single_left=single_encoder_pose(self.single_left,dl,imu_da,g.track,'left',self.spin_active)
+            self.single_right=single_encoder_pose(self.single_right,dr,imu_da,g.track,'right',self.spin_active)
         da=math.radians(self.imu_delta) if self.prefer_imu and self.imu_valid else da_enc
         self.source=('IMU' if self.imu_valid else 'ENC fallback') if self.prefer_imu else 'ENC'
         # Exact constant-curvature integration of the differential center.
@@ -86,6 +99,16 @@ class Odometry:
         self.y+=ds*scale*math.sin(self.yaw+da/2)
         self.yaw+=da;self.v=ds/dt
         return True
+
+def single_encoder_pose(pose, distance, yaw_delta, track, side, spin=False):
+    """Integrate one calibrated wheel + IMU. Input/output mm and radians."""
+    if side not in ('left','right'):
+        raise ValueError('Encoder side must be left or right')
+    ds=0.0 if spin else distance+(1 if side=='left' else -1)*track*yaw_delta/2
+    scale=1.0 if abs(yaw_delta)<1e-9 else math.sin(yaw_delta/2)/(yaw_delta/2)
+    x,y,yaw=pose
+    return (x+ds*scale*math.cos(yaw+yaw_delta/2),
+            y+ds*scale*math.sin(yaw+yaw_delta/2),yaw+yaw_delta)
 
 class Primitive:
     def __init__(self,kind,value,odom,g,now,cap=100,min_pwm=80):

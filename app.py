@@ -6,6 +6,7 @@ from dataclasses import asdict
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
+from lidar_workspace import LidarWorkspace
 from arm import ArmKinematics
 from defaults import RUNTIME_DEFAULTS, GEOMETRY_DEFAULTS
 from core import Wait, distance_scale, Geometry, Odometry, Primitive, SingleEncoderMove, ImuTurn, WheelCapture, wheel_correction, validate_routine
@@ -70,6 +71,8 @@ class Engine(threading.Thread):
         try:self.runtime.update(json.loads(Path(__file__).with_name('runtime.json').read_text()))
         except (OSError,ValueError):pass
         self.distance_reference=None;self.distance_result=None;self.sequence_status='Sin ruta'
+        try:self.distance_result=json.loads(Path(__file__).with_name('settings.json').read_text()).get('_distance_calibration')
+        except (OSError,ValueError,AttributeError):pass
 
         self.rows=deque(maxlen=60000);self.test_result='No test yet';self.stopped=True;self.last_boot=None;self.pad_ready=False;self.robot_host=self.pad_host=None;self.robot_connected_at=0;self.retry_at=0;self.wheel_mark=None;self.turn_mark=None;self.turn_delta=0.0;self.turn_origin=0.0;self.was_turning=False;self.turn_settle_until=0;self.routine=deque();self.routine_total=0;self.routine_step=0;self.next_step_at=0;self.routine_cap=85;self.last_wheel_test=None;self.capture=None;self.min_pwm=int(self.runtime["min_pwm"])
     def post(self,kind,value=None):
@@ -258,23 +261,51 @@ class Engine(threading.Thread):
             if self.robot:self.robot.send(f'POLICY:{int(bool(v))}\n')
             self.emit('Política guardada; verificar confirmación en telemetría')
         elif k=='distance_begin':
-            if self.live or self.primitive or self.capture:raise ValueError('STOP antes de marcar distancia')
-            if not self.robot or time.monotonic()-self.last_robot>.5:raise ValueError('Conectar AGV primero')
-            self.distance_reference=(self.odom.left,self.odom.right,self.telemetry['boot_id'])
-            self.distance_result=None;self.emit('Inicio marcado: avanzar recto y medir con regla')
+            if self.live or self.primitive or self.capture or self.routine:raise ValueError('STOP before marking distance')
+            if not self.robot or time.monotonic()-self.last_robot>.5:raise ValueError('Connect AGV first')
+            side=v or 'both'
+            if side not in ('left','right','both'):raise ValueError('Select Left or Right encoder')
+            if side!='both' and not self.odom.imu_valid:raise ValueError('Fresh IMU required for distance calibration')
+            self.distance_reference=dict(left=self.odom.left,right=self.odom.right,boot=self.telemetry['boot_id'],
+                                         side=side,yaw=self.odom.imu_yaw,segment=self.odom.imu_segment,valid=True)
+            self.emit('Start marked: travel 50 cm indicated, STOP, then measure actual distance')
+        elif k=='distance_test':
+            side,cap=v
+            self.handle('distance_begin',side)
+            try:self.start_test('distance_imu',50,cap,side)
+            except Exception:
+                self.distance_reference=None
+                raise
         elif k=='distance_apply':
-            if self.live or self.primitive or self.capture or self.routine:raise ValueError('STOP antes de aplicar')
-            if not self.distance_reference:raise ValueError('Marcar inicio primero')
-            if not self.robot or time.monotonic()-self.last_robot>.5:raise ValueError('Se requiere telemetría reciente')
-            l,r,boot=self.distance_reference
-            if boot!=self.telemetry['boot_id']:raise ValueError('AGV reiniciado: repetir medición')
-            dl=self.odom.left-l;dr=self.odom.right-r
-            if dl*dr<=0 or abs(dl-dr)>0.15*max(abs(dl),abs(dr)):raise ValueError('Repetir un recorrido recto, sin giros')
-            if min(abs(dl),abs(dr))<100:raise ValueError('Medir por lo menos 10 cm')
-            ratio=distance_scale(float(v),abs((dl+dr)/20))
-            new=Geometry(**asdict(self.g));new.scale_l*=ratio;new.scale_r*=ratio;new.validate()
-            self.g=new;self.save_settings();self.distance_reference=None
-            self.odom.reset();self.path.clear();self.emit(f'Escala aplicada x{ratio:.4f}; repetir recorrido para verificar')
+            if self.live or self.primitive or self.capture or self.routine:raise ValueError('STOP before applying calibration')
+            if not self.distance_reference:raise ValueError('Mark the start first')
+            if not self.robot or time.monotonic()-self.last_robot>.5:raise ValueError('Fresh telemetry required')
+            ref=self.distance_reference;side=ref['side']
+            if ref['boot']!=self.telemetry['boot_id']:raise ValueError('AGV rebooted: repeat calibration')
+            dl=self.odom.left-ref['left'];dr=self.odom.right-ref['right']
+            if side=='both':
+                if dl*dr<=0 or abs(dl-dr)>0.15*max(abs(dl),abs(dr)):raise ValueError('Repeat a straight run without turning')
+                indicated=abs((dl+dr)/20)
+            else:
+                if not ref['valid'] or not self.odom.imu_valid or self.odom.imu_segment!=ref['segment'] or abs(self.odom.imu_yaw-ref['yaw'])>5:
+                    raise ValueError('IMU lost or heading changed: repeat the straight calibration run')
+                indicated=abs(dl if side=='left' else dr)/10
+            if indicated<49:raise ValueError('Complete the 50 cm indicated run first (1 cm stopping tolerance)')
+            measured=float(v);ratio=distance_scale(measured,indicated)
+            new=Geometry(**asdict(self.g))
+            if side in ('left','both'):new.scale_l*=ratio
+            if side in ('right','both'):new.scale_r*=ratio
+            new.validate()
+            old_g,old_report=self.g,self.distance_result
+            self.g=new;self.distance_result=dict(side=side,requested_cm=50,indicated_cm=indicated,measured_cm=measured,
+                                               ratio=ratio,scale_l=new.scale_l,scale_r=new.scale_r,saved_unix_s=time.time())
+            try:self.save_settings()
+            except OSError:
+                self.g,self.distance_result=old_g,old_report
+                raise
+            self.distance_reference=None
+            choice=self.odom.prefer_imu;self.odom.reset();self.odom.prefer_imu=choice;self.path.clear()
+            self.emit(f'Saved {side} distance scale x{ratio:.4f} to settings.json; repeat 50 cm to verify')
         elif k=='stop':self.halt(bool(v))
         elif k=='source':
             self.halt();self.source=v;self.pad_base=None
@@ -356,7 +387,9 @@ class Engine(threading.Thread):
             self.emit('CSV exported')
     def save_settings(self):
         path=Path(__file__).with_name('settings.json');temporary=path.with_suffix('.tmp')
-        temporary.write_text(json.dumps(asdict(self.g),indent=2));temporary.replace(path)
+        data=asdict(self.g)
+        if self.distance_result:data['_distance_calibration']=self.distance_result
+        temporary.write_text(json.dumps(data,indent=2));temporary.replace(path)
     def start_test(self,kind,value,cap,encoder_side=None):
         reason=self.motion_block()
         if reason:raise ValueError(reason)
@@ -497,6 +530,8 @@ class Engine(threading.Thread):
                                 self.capture.observe(t)
                                 self.odom.previous=None
                             if self.odom.update(t,self.g):
+                                ref=self.distance_reference
+                                if ref and ref['side']!='both' and (not self.odom.imu_valid or self.odom.imu_segment!=ref['segment'] or abs(self.odom.imu_yaw-ref['yaw'])>5):ref['valid']=False
                                 point=(self.odom.x/10,self.odom.y/10)
                                 if not self.path:self.path.append((0.0,0.0))
                                 if math.hypot(point[0]-self.path[-1][0],point[1]-self.path[-1][1])>=0.01:self.path.append(point)
@@ -577,7 +612,7 @@ class Engine(threading.Thread):
                         if self.source=='COCO':self.halt_loss()
                         self.pad.close();self.pad=None
                 if now-getattr(self,'last_render',0)>0.1:
-                    self.last_render=now;self.signals.state.emit({'sent_pwm':self.sent_pwm,'estop_latched':self.estop_latched,'age':now-self.last_robot if self.last_robot else 0,'vl':self.odom.vl,'vr':self.odom.vr,'routine_step':self.routine_step,'routine_total':self.routine_total,'telemetry':dict(self.telemetry),'fresh':bool(self.robot and now-self.last_robot<0.5),'pad_fresh':bool(self.pad and now-self.last_pad<0.5),'path':list(self.path),'x':self.odom.x,'y':self.odom.y,'yaw':math.degrees(self.odom.yaw),'imu_yaw':self.odom.imu_yaw,'speed':self.odom.v,'result':self.test_result,'pad':dict(self.pad_data),'enc_yaw':math.degrees(self.odom.enc_yaw),'imu_valid':self.odom.imu_valid,'imu_reason':self.odom.imu_reason,'yaw_source':self.odom.source,'robot_retry':bool(self.robot_host and self.robot is None),'pad_retry':bool(self.pad_host and self.pad is None),'geometry':asdict(self.g),'capture_active':self.capture is not None,'last_wheel_test':self.last_wheel_test,'turn_delta':self.turn_delta,'dl':self.odom.dl,'dr':self.odom.dr,'arm_angles':self.arm_angles.tolist(),'arm_gripper':self.arm_gripper,'arm_target_angles':self.arm_target_angles.tolist(),'arm_target_gripper':self.arm_target_gripper,'arm_busy':self.arm_busy,'arm_error':self.arm_error})
+                    self.last_render=now;self.signals.state.emit({'distance_calibration':self.distance_result,'distance_progress':({'side':self.distance_reference['side'],'left_cm':(self.odom.left-self.distance_reference['left'])/10,'right_cm':(self.odom.right-self.distance_reference['right'])/10} if self.distance_reference else None),'pose_revision':self.odom.revision,'imu_segment':self.odom.imu_segment,'single_left':self.odom.single_left,'single_right':self.odom.single_right,'host_monotonic':now,'sent_pwm':self.sent_pwm,'estop_latched':self.estop_latched,'age':now-self.last_robot if self.last_robot else 0,'vl':self.odom.vl,'vr':self.odom.vr,'routine_step':self.routine_step,'routine_total':self.routine_total,'telemetry':dict(self.telemetry),'fresh':bool(self.robot and now-self.last_robot<0.5),'pad_fresh':bool(self.pad and now-self.last_pad<0.5),'path':list(self.path),'x':self.odom.x,'y':self.odom.y,'yaw':math.degrees(self.odom.yaw),'imu_yaw':self.odom.imu_yaw,'speed':self.odom.v,'result':self.test_result,'pad':dict(self.pad_data),'enc_yaw':math.degrees(self.odom.enc_yaw),'imu_valid':self.odom.imu_valid,'imu_reason':self.odom.imu_reason,'yaw_source':self.odom.source,'robot_retry':bool(self.robot_host and self.robot is None),'pad_retry':bool(self.pad_host and self.pad is None),'geometry':asdict(self.g),'capture_active':self.capture is not None,'last_wheel_test':self.last_wheel_test,'turn_delta':self.turn_delta,'dl':self.odom.dl,'dr':self.odom.dr,'arm_angles':self.arm_angles.tolist(),'arm_gripper':self.arm_gripper,'arm_target_angles':self.arm_target_angles.tolist(),'arm_target_gripper':self.arm_target_gripper,'arm_busy':self.arm_busy,'arm_error':self.arm_error})
             except Exception as e:self.halt(False);self.emit('Stopped: '+str(e))
             time.sleep(0.005)
         self.halt(True)
@@ -710,11 +745,15 @@ class Window(QtWidgets.QMainWindow):
         for k,v in defaults.items():
             field=QtWidgets.QLineEdit(str(v));self.fields[k]=field;af.addRow(labels[k],field)
         b=QtWidgets.QPushButton('Apply & save advanced settings');af.addRow(b);b.clicked.connect(self.apply_geometry)
-        distance_box=QtWidgets.QGroupBox('Calibrar distancia en el suelo');df=QtWidgets.QVBoxLayout(distance_box)
-        self.button(df,'1. Marcar inicio de recorrido',lambda:self.engine.post('distance_begin'))
-        help_distance=QtWidgets.QLabel('Avanza recto al menos 10 cm, pulsa STOP y mide el recorrido real. No gires durante esta medición.');help_distance.setWordWrap(True);df.addWidget(help_distance)
-        self.real_distance=self.number(1,500,50,' cm reales');df.addWidget(self.real_distance)
-        self.button(df,'2. Aplicar escala de distancia',lambda:self.engine.post('distance_apply',self.real_distance.value()))
+        distance_box=QtWidgets.QGroupBox('Ground distance calibration · 50 cm');df=QtWidgets.QVBoxLayout(distance_box)
+        self.distance_encoder=QtWidgets.QComboBox();self.distance_encoder.addItems(['Left','Right']);df.addWidget(self.distance_encoder)
+        if self.engine.distance_result and self.engine.distance_result.get('side') in ('left','right'):self.distance_encoder.setCurrentText(self.engine.distance_result['side'].title())
+        self.button(df,'1. START 50 cm · encoder + IMU',lambda:self.engine.post('distance_test',(self.distance_encoder.currentText().lower(),self.cap.value())))
+        self.button(df,'STOP / keep distance',self.stop)
+        help_distance=QtWidgets.QLabel('Choose the reliable encoder. Mark the floor, run 50 cm indicated, then measure the actual travel. Keep a straight heading. Only the selected encoder scale is updated.');help_distance.setWordWrap(True);df.addWidget(help_distance)
+        self.distance_feedback=QtWidgets.QLabel('No distance calibration yet');self.distance_feedback.setWordWrap(True);df.addWidget(self.distance_feedback)
+        self.real_distance=self.number(1,500,50,' cm actual');df.addWidget(self.real_distance)
+        self.button(df,'2. APPLY + SAVE distance scale',lambda:self.engine.post('distance_apply',self.real_distance.value()))
         cal.addWidget(distance_box);cal.addStretch()
         routine.addWidget(QtWidgets.QLabel('Add distance / angle steps, then RUN.\nStops between steps. STOP cancels the sequence.'))
         self.routine_kind=QtWidgets.QComboBox();self.routine_kind.addItems(['Move (cm)','Rotate (degrees)','Rotate precise IMU (degrees)','Wait (seconds)'])
@@ -743,9 +782,8 @@ class Window(QtWidgets.QMainWindow):
         self.cameras=CamerasPage()
         camera_scroll=QtWidgets.QScrollArea();camera_scroll.setWidgetResizable(True);camera_scroll.setWidget(self.cameras)
         self.workspaces.addTab(camera_scroll,'Cámaras IP · ArUco')
-        lidar=QtWidgets.QLabel('LiDAR / SLAM · pendiente de integración\n\nLa odometría del AGV ya está disponible.\nFalta conectar el protocolo del LiDAR y calibrar su posición respecto al chasis.\nEsta pestaña no calcula SLAM ni muestra datos simulados.')
-        lidar.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.workspaces.addTab(lidar,'LiDAR / SLAM')
+        self.lidar_workspace=LidarWorkspace()
+        self.workspaces.addTab(self.lidar_workspace,'LiDAR / SLAM')
         right.removeWidget(self.notice);outer.addWidget(self.notice)
         right.removeWidget(self.log);outer.addWidget(self.log);self.log.setMaximumHeight(65)
         self.workspaces.currentChanged.connect(self.workspace_changed)
@@ -922,6 +960,13 @@ class Window(QtWidgets.QMainWindow):
         p,_=QtWidgets.QFileDialog.getSaveFileName(self,'Export telemetry','telemetry.csv','CSV (*.csv)')
         if p:self.engine.post('export',p)
     def render(self,s):
+        self.lidar_workspace.receive_state(s)
+        progress=s.get('distance_progress');calibration=s.get('distance_calibration')
+        if progress:
+            side=progress['side'];value=progress.get(side+'_cm',0)
+            self.distance_feedback.setText(f"{side.title()} encoder: {value:.2f} / 50 cm indicated. Enter actual travel after STOP.")
+        elif calibration:
+            self.distance_feedback.setText(f"Saved {calibration['side']}: indicated {calibration['indicated_cm']:.2f} cm / actual {calibration['measured_cm']:.2f} cm · factor {calibration['ratio']:.4f}")
         if hasattr(self,'arm_workspace'):self.arm_workspace.receive_state(s)
         t=s['telemetry'];g=s['geometry'];fresh=s['fresh'];heading=t.get('heading',0)
         sent=s.get('sent_pwm',(0,0))
@@ -989,6 +1034,7 @@ class Window(QtWidgets.QMainWindow):
                 QtCore.QTimer.singleShot(200,self.close)
                 event.ignore();return
         self.cameras.shutdown()
+        self.lidar_workspace.shutdown()
         self.engine.quit=True;self.engine.join(1.5);event.accept()
 
 if __name__=='__main__':

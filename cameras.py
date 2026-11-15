@@ -8,9 +8,10 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 
 class CameraPanel(QtWidgets.QGroupBox):
-    def __init__(self,title,config,parent=None):
+    def __init__(self,title,config,parent=None,arm_camera_api=False):
         super().__init__(title,parent)
         self.proc=QtCore.QProcess(self);self.buffer=b'';self.last_frame=0;self.stopping=False
+        self.arm_camera_api=arm_camera_api;self.received_frame=False
         self.proc.readyReadStandardOutput.connect(self.read_output)
         self.proc.readyReadStandardError.connect(lambda:self.proc.readAllStandardError())
         self.proc.finished.connect(self.finished)
@@ -18,6 +19,9 @@ class CameraPanel(QtWidgets.QGroupBox):
         box=QtWidgets.QVBoxLayout(self);form=QtWidgets.QFormLayout();box.addLayout(form)
         self.url=QtWidgets.QLineEdit(config.get('url',''));self.url.setPlaceholderText('http://192.168.x.x:81/stream')
         form.addRow('ESP32-S3 · URL',self.url)
+        if self.arm_camera_api:
+            self.url.setPlaceholderText('ESP32-S3 IP or base URL, e.g. 192.168.3.17')
+            form.labelForField(self.url).setText('Arm ESP32-S3 IP / URL')
         self.dictionary=QtWidgets.QComboBox();self.dictionary.addItems(['DICT_4X4_50','DICT_4X4_100','DICT_5X5_100','DICT_6X6_250'])
         self.dictionary.setCurrentText(config.get('dictionary','DICT_4X4_50'));form.addRow('Diccionario ArUco',self.dictionary)
         self.marker=QtWidgets.QDoubleSpinBox();self.marker.setRange(1,1000);self.marker.setValue(config.get('marker_mm',35));self.marker.setSuffix(' mm');form.addRow('Lado exterior marcador',self.marker)
@@ -34,13 +38,14 @@ class CameraPanel(QtWidgets.QGroupBox):
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch);self.table.setMaximumHeight(160);box.addWidget(self.table)
         self.watchdog=QtCore.QTimer(self);self.watchdog.timeout.connect(self.check_age);self.watchdog.start(500)
 
-    def config(self):return {'url':self.url.text().strip(),'dictionary':self.dictionary.currentText(),'marker_mm':self.marker.value(),'calibration':self.calibration.text().strip()}
+    def config(self):return {'url':self.url.text().strip(),'dictionary':self.dictionary.currentText(),'marker_mm':self.marker.value(),'calibration':self.calibration.text().strip(),'arm_camera_api':self.arm_camera_api}
     def select_calibration(self):
         path,_=QtWidgets.QFileDialog.getOpenFileName(self,'Calibración de esta cámara','','NumPy (*.npz)')
         if path:self.calibration.setText(path)
     def start(self):
         if self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning:return
         self.stopping=False;self.buffer=b'';self.last_frame=time.monotonic()
+        self.received_frame=False
         self.status.setText('Conectando…');self.connect_button.setEnabled(False)
         self.proc.start(sys.executable,['-u',str(Path(__file__).with_name('camera_worker.py')),json.dumps(self.config())])
     def stop(self):
@@ -54,9 +59,10 @@ class CameraPanel(QtWidgets.QGroupBox):
         self.preview.clear();self.preview.setText('Sin imagen · desconectada')
         if not self.stopping:self.status.setText('Desconectada: '+self.status.text())
     def check_age(self):
-        if self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning and time.monotonic()-self.last_frame>4:
+        timeout=25 if self.arm_camera_api and not self.received_frame else 4
+        if self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning and time.monotonic()-self.last_frame>timeout:
             self.table.setRowCount(0);self.preview.clear();self.preview.setText('Sin imagen reciente')
-            self.status.setText('Sin frames >4 s; reconectar cámara');self.proc.kill()
+            self.status.setText(f'No camera frames within {timeout} s; reconnect');self.proc.kill()
     def read_output(self):
         self.buffer+=bytes(self.proc.readAllStandardOutput())
         if len(self.buffer)>4000000:
@@ -67,9 +73,11 @@ class CameraPanel(QtWidgets.QGroupBox):
         try:
             packet=json.loads(lines[-1])
             if 'error' in packet:self.status.setText(packet['error']);return
+            if 'status' in packet:self.status.setText(packet['status']);return
             image=QtGui.QImage.fromData(base64.b64decode(packet['jpeg']))
             if image.isNull():return
             self.last_frame=time.monotonic()
+            self.received_frame=True
             pixmap=QtGui.QPixmap.fromImage(image).scaled(self.preview.size(),QtCore.Qt.AspectRatioMode.KeepAspectRatio,QtCore.Qt.TransformationMode.SmoothTransformation)
             self.preview.setPixmap(pixmap)
             rows=packet['detections'];self.table.setRowCount(len(rows))
@@ -95,7 +103,7 @@ class CamerasPage(QtWidgets.QWidget):
         note=QtWidgets.QLabel('Dos ESP32-S3 independientes. Las distancias se expresan respecto a cada cámara. Para llevar un objeto al brazo falta la transformación cámara–base; no se envían movimientos desde esta vista.')
         note.setWordWrap(True);box.addWidget(note)
         split=QtWidgets.QSplitter();box.addWidget(split,1)
-        self.panels=[CameraPanel(name,config if isinstance(config,dict) else {}) for name,config in zip(('Cámara AGV','Cámara brazo'),configs)]
+        self.panels=[CameraPanel(name,config if isinstance(config,dict) else {},arm_camera_api=index==1) for index,(name,config) in enumerate(zip(('Cámara AGV','Arm camera'),configs))]
         for panel in self.panels:split.addWidget(panel)
         button=QtWidgets.QPushButton('Guardar URLs y calibraciones');button.clicked.connect(self.save);box.addWidget(button)
         self.saved=QtWidgets.QLabel('');box.addWidget(self.saved)

@@ -1,0 +1,16 @@
+[
+  {
+    "url": "192.168.3.17",
+    "dictionary": "DICT_4X4_50",
+    "marker_mm": 35.0,
+    "calibration": "",
+    "arm_camera_api": false
+  },
+  {
+    "url": "192.168.3.17",
+    "dictionary": "DICT_4X4_50",
+    "marker_mm": 35.0,
+    "calibration": "",
+    "arm_camera_api": true
+  }
+]

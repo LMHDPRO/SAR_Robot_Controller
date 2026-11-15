@@ -1,0 +1,7 @@
+{
+  "robot_ip": "192.168.3.11",
+  "pad_ip": "192.168.137.115",
+  "arm_camera_url": "192.168.3.17",
+  "cut_relays_on_loss": true,
+  "min_pwm": 80
+}

@@ -5,10 +5,11 @@ Integración de **SAR 1.5 + RobotArmCodeV7(2).py**. Aplicación local Python/PyS
 ## Qué está integrado
 
 - **AGV:** conducción, odometría, calibraciones de ruedas/distancia, giros por IMU, rutinas y exportación CSV de la versión 1.5.
-- **Brazo V7:** espacio propio con preview Matplotlib 3D rotatable, sliders FK/IK, pinza, velocidades, puntos A/B, obstáculos y planificación. Conserva los métodos de visión/YOLO, búsqueda y pick-and-place de V7. El mapa AGV no se muestra en esta vista.
+- **Arm V7:** separate 3D preview, FK/IK controls, gripper, speed, A/B points, obstacles and manual path planning. The Camera tab is preview-only; it cannot start autonomous search or grasping. ArUco detection remains in Cameras IP.
 - **Control global:** IP del AGV y COCO, propietario PC/COCO, alimentación, STOP, E-STOP, desbloqueo, reset de odometría y estados I2C/PWM/telemetría visibles en todas las pestañas.
 - **Dos cámaras ESP32-S3 IP:** conexiones independientes, preview MJPEG/RTSP según firmware de cámara, detección ArUco y distancia en coordenadas de cada cámara si está calibrada. Captura en procesos separados, sin bloquear el hilo de interfaz si la conexión falla.
-- **LiDAR/SLAM:** pestaña informativa para la integración futura. NO implementa SLAM, un decodificador LiDAR ni fusión de sensores.
+- **LiDAR/SLAM:** external COIN-D6 over a dedicated PC-to-LiDAR TCP connection (no USB or LiDAR traffic through the AGV), offline replay, recording and experimental local 2D SLAM. Select Left/Right encoder + IMU prediction, configure footprint/sector exclusion, and save the finished map as NPZ + PNG. No loop closure or autonomous navigation.
+- **Ground calibration:** 50 cm test with selectable Left/Right encoder and IMU heading hold, actual-distance entry and atomic persistence in `settings.json`.
 
 ## Instalación y ejecución
 
@@ -18,11 +19,13 @@ Se recomienda Python 3.11 o 3.12 de 64 bits. Desde la terminal de VS Code en est
 python -m venv .venv
 # Windows PowerShell:
 .venv\Scripts\Activate.ps1
-python -m pip install "PySide6>=6.8,<7" "pyqtgraph==0.14.0" "numpy>=1.26,<3" matplotlib pyserial "opencv-contrib-python-headless>=4.10,<6"
+python -m pip install "PySide6==6.8.3" "pyqtgraph==0.14.0" "numpy>=1.26,<3" matplotlib pyserial "opencv-contrib-python-headless>=4.10,<6"
 python app.py
 ```
 
-Seleccionar ese intérprete en VS Code. Qt proporciona la ventana; OpenCV no necesita ventanas propias. Evitar instalar simultáneamente varias distribuciones OpenCV. Para el detector YOLO original de V7, instalar opcionalmente `ultralytics` y seleccionar el modelo `.pt` entrenado. No se incluye ese modelo.
+Select this interpreter in VS Code. Qt provides the window; OpenCV does not need its own windows. Avoid installing multiple OpenCV distributions in the same environment. No learned object detector or model weights are required.
+
+Se fija Qt 6.8.3 para evitar el fallo de instalación por rutas largas encontrado con Qt 6.12 en esta carpeta de Windows. Para conexión, calibración y límites de SLAM, consultar [LIDAR_SLAM.md](LIDAR_SLAM.md).
 
 ## Archivos
 
@@ -35,6 +38,12 @@ Seleccionar ese intérprete en VS Code. Qt proporciona la ventana; OpenCV no nec
 | `arm_workspace.py` | Adaptación de V7 al transporte SAR y paradas globales |
 | `cameras.py` | Dos paneles de cámara y gestión de procesos |
 | `camera_worker.py` | Lectura de stream, detección ArUco y estimación de pose |
+| `camera_connection.py` | Arm ESP32-S3 camera discovery, MJPEG mode selection and activation |
+| `lidar_workspace.py` | Pestaña LiDAR, calibración, captura, mapa y exportación |
+| `slam.py` | SLAM local 2D por ICP, validación y mapa de puntos acotado |
+| `lidar_filters.py` | Robot footprint and configurable angular exclusion |
+| `map_export.py` | NPZ map archive, calibration metadata and PNG plot |
+| `coind6/` | Decodificador, ensamblador y adquisición del ZIP Lidar del usuario |
 | `defaults.py` | IP y calibraciones iniciales conservadas de la versión 1.5 |
 | `firmware/SAR_AGV/SAR_AGV.ino` | AGV, BNO055, relés y PCA9685 del brazo |
 | `firmware/COCO_Controller/COCO_Controller.ino` | Mando COCO |
@@ -49,11 +58,24 @@ Se conserva como valor inicial la IP **192.168.3.11** del AGV y **192.168.137.11
 | PC → AGV | TCP 4211 | IP en barra global |
 | PC → COCO | TCP 4210 | IP en barra global |
 | PC → cámara AGV | URL del stream | Pestaña Cámaras IP |
-| PC → cámara brazo | URL del stream | Pestaña Cámaras IP |
-| PC → cámara usada por V7/YOLO | URL del stream | Brazo → Visión |
+| PC → arm camera | ESP32-S3 IP/base URL; CameraIP API | Cameras IP → Arm camera |
+| PC → arm camera preview | Same ESP32-S3 IP/base URL; CameraIP API | Arm → Camera |
 | AGV → PCA9685/BNO055/OLED | I2C | SDA 11 / SCL 12 |
 
 Ejemplo de URL común en firmware CameraWebServer: `http://IP_DE_LA_ESP32:81/stream`. Usar el endpoint que publique realmente cada cámara; no todas usan ese puerto o ruta. Conservar el firmware de cámara que ya funciona: este paquete no inventa un pinout de cámara ESP32-S3, porque depende del modelo exacto. Los dos sketches incluidos son AGV y COCO.
+
+### Arm camera: supplied CameraIP.py procedure
+
+Enter the arm camera ESP32-S3 IP (for example `192.168.3.17`) or base URL (`http://192.168.3.17`, including a port if needed). The address remains user-configurable; connecting does not use a hardcoded device address. The same procedure is used by the arm camera panel and Arm/Camera:
+
+1. GET `/api/cameras` with a 5-second timeout.
+2. Select the first reported camera. Prefer 320x240 MJPEG; otherwise use the smallest advertised valid mode.
+3. If its ID is not listed in `activated`, POST compact JSON to `/api/active` with `id` and `resolution` (`width`, `height`, `index`), using a 10-second timeout, then wait one second.
+4. Open `/api/stream/{id}`. An already active camera is not reconfigured. Discovery/activation run in the capture worker, outside the UI thread.
+
+An explicit `/api/stream/{id}` URL discovers that specific ID. Existing explicit direct stream URLs such as `/stream`, `:81/stream` or RTSP remain supported without discovery. Use the IP/base URL for the supplied firmware's automatic procedure. The arm camera panel allows up to 25 seconds for initial discovery/activation/opening, then uses the normal 4-second frame-loss watchdog. The AGV camera retains its existing direct-stream connection procedure.
+
+Save panel addresses with the camera page's save button. Arm/Camera preloads `arm_camera_url` from `runtime.json` (initialized to the current arm-camera IP) and saves edits when the field loses focus; the two views retain separate address settings. Stop the unused view before switching if the camera firmware only supports one stream client. No firmware changes or new Python dependencies are required. Hardware connectivity and image quality still need testing with the actual ESP32-S3.
 
 Las claves Wi-Fi se sustituyeron por `CONFIGURAR_CLAVE_WIFI` para no incluir contraseñas reales en un repositorio. Configurar SSID y contraseña en ambos sketches antes de cargar. No publicar los valores reales en GitHub.
 
@@ -128,15 +150,19 @@ X cámara apunta a la derecha de la imagen, Y hacia abajo y Z hacia delante. Dis
 
 La conversión futura requiere `T_base_camera` para una cámara fija. En la cámara montada en muñeca, requiere `T_base_tool(q) @ T_tool_camera` y sincronización temporal con la pose. También falta asociar el ID al objeto de rescate y definir agarre, altura de aproximación y destino. Esas calibraciones no se pueden inferir de las IP.
 
-## Visión original V7
+## Camera tests and future marker-guided SAR procedure
 
-Brazo → Visión conserva YOLO, tabla de objetos, destino, búsqueda y pick-and-place. Su URL se configura en ese panel y se guarda con los ajustes SAR. Los parámetros de compensación geométrica siguen siendo los del código original; deben revisarse para la instalación actual. La detección de rescate por ArUco no sustituye automáticamente a su detector Tetris/YOLO.
+**Arm > Camera** tests the camera connection and shows a preview without inference or motion. **Cameras IP** detects ArUco IDs and displays calibrated camera-frame positions. The old object-search, class/confidence, model selection and automatic pickup pipeline have been removed. Manual arm control and path planning remain available. Preview resizing preserves the camera aspect ratio.
+
+Proposed later procedure (not implemented): use one marker ID for AGV alignment to a chosen distance and heading; after stopping the AGV, use a second marker attached to the top of the object (confirmed by the user) for arm localization and grasping. IDs identify roles, not grasp coordinates. First verify live images and reliable IDs; then calibrate camera intrinsics, marker dimensions, camera-to-AGV/tool transforms and marker-to-grasp offset. Validate pose measurements and stale/lost-marker handling before enabling autonomous motion. No alignment, approach or grasp motion is triggered by the current camera views.
+
+See [OpenCV ArUco detection and pose estimation](https://docs.opencv.org/4.10.0/d5/dae/tutorial_aruco_detection.html) for the camera calibration and physical marker-size requirements. Camera-frame measurements must still be transformed into the relevant robot frame.
 
 No abrir el mismo stream simultáneamente en V7 y en Cámaras IP si el firmware ESP32 admite un único cliente. Detener una vista antes de iniciar la otra. Las dos cámaras distintas sí pueden verse simultáneamente.
 
 ## Persistencia y repositorio
 
-Al usar la app se crean archivos locales JSON para ajustes, URLs y parámetros de visión. No se incluyen archivos de configuración generados por las pruebas. `defaults.py` contiene los valores originales para el primer inicio. Conviene excluir del repositorio `.venv/`, `__pycache__/`, `*.pyc`, los JSON locales, calibraciones personales, grabaciones y modelos `.pt`. No se incluyeron BAT, informes antiguos ni hashes desactualizados.
+Al usar la app se crean archivos locales JSON para ajustes, URLs y parámetros de visión. No se incluyen archivos de configuración generados por las pruebas. `defaults.py` contiene los valores originales para el primer inicio. Conviene excluir del repositorio `.venv/`, `__pycache__/`, `*.pyc`, los JSON locales, calibraciones personales, grabaciones. No se incluyeron BAT, informes antiguos ni hashes desactualizados.
 
 ## Validación y límites
 

@@ -6,7 +6,7 @@ from robotarm_v7 import MainWindow
 
 
 class ArmWorkspace(MainWindow):
-    VISION_GRIPPER_OPEN_DEG = 75  # SAR firmware permits CH5 10..75, not V7's 90.
+    arm_camera_api = True
 
     def __init__(self, engine):
         self.engine = engine
@@ -24,12 +24,15 @@ class ArmWorkspace(MainWindow):
         self.slider_pinza.setMinimum(10)
         self.btn_stop_path.clicked.connect(self.stop_robot)
         self.camera_source.setText(self.engine.runtime.get('arm_camera_url', ''))
-        self.camera_source.setPlaceholderText('http://IP_ESP32:81/stream')
+        self.camera_source.setPlaceholderText('ESP32-S3 IP or base URL, e.g. 192.168.3.17')
+        self.camera_source.setToolTip('Discover /api/cameras, activate MJPEG if needed, then open /api/stream/{id}')
+        camera_layout=self.camera_source.parentWidget().layout()
+        camera_layout.itemAtPosition(0,0).widget().setText('Arm ESP32-S3 IP / URL')
         self.camera_source.editingFinished.connect(self.save_camera_url)
         self.link_status=QtWidgets.QLabel('Brazo: sin telemetría. Preview simulado.')
         self.link_status.setWordWrap(True)
         self.centralWidget().layout().insertWidget(1,self.link_status)
-        for box in (self.chk_live,self.chk_path_physical,self.chk_vision_physical):
+        for box in (self.chk_live,self.chk_path_physical):
             box.toggled.connect(lambda checked,b=box:self.physical_option(b,checked))
         self.engine.signals.cancelled.connect(self.cancel_motion)
         self._force_draw=True
@@ -89,7 +92,7 @@ class ArmWorkspace(MainWindow):
         self.link_status.setText(f"PCA9685: {'OK' if ready else 'sin datos / no disponible'} | "
             f"Control: {self.engine.source} | Firmware: {'interpolando' if state.get('arm_busy') else 'en espera'} | "
             'Vista y telemetría PWM estimadas; sin encoders articulares')
-        physical=any(b.isChecked() for b in (self.chk_live,self.chk_path_physical,self.chk_vision_physical))
+        physical=any(b.isChecked() for b in (self.chk_live,self.chk_path_physical))
         if physical and self.block_reason():self.cancel_motion()
         if self.engine.source=='COCO' and state.get('fresh'):
             self.sync_pose(state.get('arm_angles'),state.get('arm_gripper',75))
@@ -101,12 +104,10 @@ class ArmWorkspace(MainWindow):
         self.vision_detection_armed=False;self.locked_detection=None
         self._force_hardware_send=False
         if clear_options:
-            for box in (self.chk_live,self.chk_path_physical,self.chk_vision_physical):box.setChecked(False)
+            for box in (self.chk_live,self.chk_path_physical):box.setChecked(False)
         self.slider_target_fk=self.current_physical_angles.copy()
         self.slider_target_xyz=np.array(self.current_xyz).copy()
         self.pendant_target_xyz=np.array(self.current_xyz).copy()
-        self.btn_vision.setText('Iniciar búsqueda continua')
-        self.lbl_vision_phase.setText('Fase: IDLE · detenido')
         self.sync_pose(self.current_physical_angles,self.slider_pinza.value())
 
     def stop_robot(self):
@@ -135,10 +136,8 @@ class ArmWorkspace(MainWindow):
         super()._draw_robot(transforms)
 
     def _trigger_safe_recovery(self,reason):
-        # An unexpected software exception must stop hardware, not start recovery motion.
-        if str(reason).startswith('Excepción'):
-            self.stop_robot();self._show_msg(reason,True);return
-        super()._trigger_safe_recovery(reason)
+        # Camera processing cannot initiate recovery or any physical movement.
+        self.stop_robot();self._show_msg(reason,True)
 
     def _connect_arduino(self):self._show_msg('Usar Connect AGV en la barra global.')
     def _connect_pendant(self,automatic=False):self._show_msg('Usar Connect COCO en la barra global.')
