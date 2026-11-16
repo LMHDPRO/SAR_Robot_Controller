@@ -103,7 +103,7 @@ Este es el cableado del archivo adjunto, no un pinout genérico para cualquier d
 | CH0 | Base | 0–180° |
 | CH1 | Hombro | 0–180° |
 | CH2 | Codo | 0–180° |
-| CH3 | Giro de muñeca fijo | 90° |
+| CH3 | Giro de muñeca | 0–180°; preview PC no lo modela (inicia en 90°) |
 | CH4 | Elevación muñeca | 0–180° |
 | CH5 | Pinza | 10–75° |
 
@@ -119,6 +119,13 @@ V7 permitía 90° de apertura automática; el adaptador usa 75° para respetar l
 | Deadman | 10 |
 | OLED SDA/SCL | 11 / 12 |
 
+### Control del brazo desde COCO
+
+- **A · Joint:** girar el encoder para seleccionar uno de los seis canales PCA9685; el eje vertical del joystick del brazo suma o resta grados al canal seleccionado. CH0–CH4 usan 0–180° y CH5 (pinza) 10–75°. El modo A no mueve el AGV.
+- **B · Gamepad:** los ejes del joystick mueven el objetivo en X/Y cartesianos y el IK CCD existente convierte el objetivo a ángulos. El encoder cambia Z o pinza, según su botón.
+- **C · TCP:** queda temporalmente igual que B y reutiliza el IK CCD actual; no es aún un controlador TCP independiente.
+- Los tres modos requieren COCO como propietario, AGV listo, deadman y joystick centrado antes de habilitar movimiento. El botón global **Enviar pose del brazo** permanece visible entre pestañas; cambiar de pestaña principal sigue enviando STOP a los movimientos físicos en curso.
+
 Bibliotecas Arduino: WiFi/Wire/Preferences incluidas en ESP32; Adafruit BNO055, Unified Sensor, GFX, SSD1306, PWM Servo Driver y sus dependencias. El constructor correcto es `Adafruit_PWMServoDriver pca(PCA_ADDR, Wire);`. Usar la placa/PSRAM/flash correspondientes a cada módulo. El firmware conserva la API ESP32 Arduino 3.x del proyecto original; no se compiló aquí con tu placa.
 
 ## Secuencia de operación
@@ -128,8 +135,8 @@ Bibliotecas Arduino: WiFi/Wire/Preferences incluidas en ESP32; Adafruit BNO055, 
 3. Si hay emergencia, liberar el paro físico y pulsar **Desbloquear E-STOP**. Esperar confirmación; esto no activa los relés.
 4. Seleccionar propietario **PC** o **COCO** y pulsar **POWER ON** cuando corresponda.
 5. En **AGV**, utilizar los controles existentes. Se conservan los ajustes reales del ZIP: rueda 120 mm, track 200 mm, 900 ticks/rev, escalas 0.6463144897, signos de encoder -1, IMU -1 e intercambio de encoders activado. Verificar físicamente esos valores en lugar de asumir que ya están calibrados para otra mecánica.
-6. Al cambiar de pestaña principal se envía STOP y se cancelan las tareas del brazo. Una pestaña no deja un movimiento anterior ejecutándose de forma oculta.
-7. En **Brazo**, los sliders y trayectorias son simulados por defecto. **Enviar al Robot** manda una pose explícita. Las casillas de reproducción física requieren conexión, telemetría, PCA9685 y propiedad PC. Al habilitarlas, el preview se sincroniza con la estimación PWM del firmware antes de aceptar movimientos nuevos.
+6. Al cambiar de pestaña principal se envía STOP y se cancelan las tareas del brazo. Una pestaña no deja un movimiento anterior ejecutándose de forma oculta; el botón global de envío de pose sigue disponible.
+7. En **Brazo**, los sliders y trayectorias son simulados por defecto. **Enviar pose del brazo** manda una pose explícita. Las casillas de reproducción física requieren conexión, telemetría, PCA9685 y propiedad PC. Al habilitarlas, el preview se sincroniza con la estimación PWM del firmware antes de aceptar movimientos nuevos.
 8. COCO sigue conectado por SAR, con sus modos y deadman existentes. La conexión USB/pendant propia de V7 no se expone para evitar dos controladores compitiendo por el brazo.
 9. **STOP** cancela rutas, colas de visión, recuperación y envío live; detiene motores e interpolación de servos. **E-STOP** además enclava el paro y apaga relés. Los PWM de servo reportados son estimaciones, no realimentación de encoders. Reset odometría cambia la referencia estimada; no hace homing.
 10. Una pérdida de enlace o rechazo del motor SAR cancela las fuentes físicas de V7. La reconexión no vuelve a marcar las casillas ni reanuda rutas. Cerrar la app detiene el robot y los procesos de cámara.
@@ -174,4 +181,4 @@ python -m unittest discover -s tests -v
 
 Las pruebas incluyen el controlador existente, sockets con robot simulado, exclusión visual AGV/brazo, cancelación del brazo, correspondencia FK entre SAR y V7, bloqueo live sin conexión y ArUco sintético con/sin calibración. El test de mantener relés durante pérdida de telemetría selecciona explícitamente esa política; el valor inicial conservado del usuario es apagar relés.
 
-Resultado en este entorno: 68 pruebas automatizadas aprobadas. También se verificaron dos procesos simultáneos contra streams MJPEG locales con un marcador ArUco sintético. La interfaz y la lógica se verifican en software. Falta la validación con el AGV, servos, cámaras ESP32-S3 y placas reales, y la compilación Arduino local. La comprobación de obstáculos de V7 es un modelo geométrico; no equivale a detección física de colisión. Esta versión no incorpora homing con sensores, SLAM, calibración extrínseca ni rescate autónomo por ArUco.
+Resultado en este entorno: 135 pruebas automatizadas aprobadas. También se verificaron dos procesos simultáneos contra streams MJPEG locales con un marcador ArUco sintético. La interfaz y la lógica se verifican en software. Falta la validación con el AGV, servos, cámaras ESP32-S3 y placas reales, y la compilación Arduino local. La comprobación de obstáculos de V7 es un modelo geométrico; no equivale a detección física de colisión. Esta versión no incorpora homing con sensores, SLAM, calibración extrínseca ni rescate autónomo por ArUco.

@@ -59,8 +59,9 @@ class Engine(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True);self.signals=Signals();self.commands=queue.Queue();self.quit=False
         self.robot=self.pad=None;self.g=Geometry();self.odom=Odometry();self.telemetry={}
-        self.arm_model=ArmKinematics();self.arm_angles=self.arm_model.startup_angles.copy();self.arm_gripper=75.0
+        self.arm_model=ArmKinematics();self.arm_angles=self.arm_model.startup_angles.copy();self.arm_gripper=75.0;self.arm_rotation=90.0
         self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper
+        self.arm_target_rotation=self.arm_rotation
         self.arm_busy=False;self.arm_error='';self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
         self.last_robot=self.last_pad=0;self.pad_data={};self.pad_base=None;self.pad_released=False;self.pad_authorized=False
         self.live=None;self.primitive=None;self.source='PC';self.last_ui=time.monotonic();self.path=deque(maxlen=10000)
@@ -131,7 +132,8 @@ class Engine(threading.Thread):
         self.signals.cancelled.emit()
         if self.capture:self.capture.stop('Stopped: partial capture retained',time.monotonic())
         self.routine.clear();self.live=None;self.primitive=None;self.pad_authorized=False;self.pad_released=False;self.stopped=True
-        self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper;self.arm_busy=False
+        self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper
+        self.arm_target_rotation=self.arm_rotation;self.arm_busy=False
         if self.robot:
             try:
                 send=getattr(self.robot,'urgent',self.robot.send)
@@ -148,7 +150,7 @@ class Engine(threading.Thread):
         if self.telemetry.get('pca_ready')!=1:return 'PCA9685 not ready on AGV'
         if self.telemetry.get('arm_protocol')!=1:return 'Cargar firmware SAR con soporte del brazo'
         return ''
-    def send_arm_pose(self,angles,gripper,duration_ms,owner):
+    def send_arm_pose(self,angles,gripper,duration_ms,owner,rotation=None):
         reason=self.arm_motion_block(owner)
         if reason:raise ValueError(reason)
         if owner=='PC' and (self.live or self.primitive or self.routine or self.capture):
@@ -157,16 +159,58 @@ class Engine(threading.Thread):
         if target.shape!=(4,) or not np.all(np.isfinite(target)) or np.any(target<0) or np.any(target>180):
             raise ValueError('Arm joint angles must be finite and between 0 and 180 degrees')
         grip=float(gripper)
+        wrist_rotation=self.arm_target_rotation if rotation is None else float(rotation)
         duration=int(duration_ms)
         if not math.isfinite(grip) or not 10<=grip<=75:raise ValueError('Gripper angle must be between 10 and 75 degrees')
+        if not math.isfinite(wrist_rotation) or not 0<=wrist_rotation<=180:raise ValueError('Wrist rotation angle must be between 0 and 180 degrees')
         if not 100<=duration<=10000:raise ValueError('Arm move duration must be between 100 and 10000 ms')
-        channels=[int(round(target[0])),int(round(target[1])),int(round(target[2])),90,int(round(target[3])),int(round(grip))]
+        channels=[int(round(target[0])),int(round(target[1])),int(round(target[2])),int(round(wrist_rotation)),int(round(target[3])),int(round(grip))]
         self.robot.send(f"ARM:{','.join(map(str,channels))},{duration}\n")
         self.arm_target_angles=target.copy();self.arm_target_gripper=grip
+        self.arm_target_rotation=wrist_rotation
         self.arm_model.last_ik_theta=self.arm_model.convert_angles(target)
         self.arm_busy=True;self.arm_error=''
         if owner=='PC':self.emit('Pose arm transmitida al AGV por la conexión existente')
+    def update_arm_joints_from_coco(self,p,now):
+        reason=self.arm_motion_block('COCO')
+        if reason:
+            self.arm_error=reason
+            return
+        joint_index=p.get('arm_joint_index')
+        axis=p.get('arm_filtered_y',0)
+        if type(joint_index) is not int or not 0<=joint_index<6:
+            self.arm_error='Invalid COCO arm joint selection'
+            return
+        if not isinstance(axis,(int,float)) or not math.isfinite(axis):
+            self.arm_error='Invalid COCO arm joystick data'
+            return
+        elapsed=0.0 if self.coco_arm_at is None else min(.1,max(0.0,now-self.coco_arm_at))
+        self.coco_arm_at=now
+        delta=max(-100.0,min(100.0,float(axis)))/100.0*30.0*elapsed
+        if abs(delta)<.001:return
+        angles=self.arm_target_angles.copy()
+        rotation=self.arm_target_rotation
+        gripper=self.arm_target_gripper
+        if joint_index<3:
+            angles[joint_index]=max(0.0,min(180.0,angles[joint_index]+delta))
+        elif joint_index==3:
+            rotation=max(0.0,min(180.0,rotation+delta))
+        elif joint_index==4:
+            angles[3]=max(0.0,min(180.0,angles[3]+delta))
+        else:
+            gripper=max(10.0,min(75.0,gripper+delta))
+        if (np.max(np.abs(angles-self.arm_target_angles))<.5
+                and abs(rotation-self.arm_target_rotation)<.5
+                and abs(gripper-self.arm_target_gripper)<.5):
+            return
+        try:
+            self.send_arm_pose(angles,gripper,150,'COCO',rotation)
+        except ValueError as exc:
+            self.arm_error=str(exc)
     def update_arm_from_coco(self,p,now):
+        if p.get('mode')=='A':
+            self.update_arm_joints_from_coco(p,now)
+            return
         reason=self.arm_motion_block('COCO')
         if reason:
             self.arm_error=reason
@@ -198,13 +242,9 @@ class Engine(threading.Thread):
         target_angles=self.arm_target_angles.copy()
         x,y,z=self.arm_model.compute_fk(target_angles)[0]
         gripper=self.arm_target_gripper
-        radius=math.hypot(x,y);theta=math.atan2(y,x)
         arm_mode=p.get('arm_mode','XY')
         if arm_mode=='XY':
-            radius+=axes[1]*25.0*elapsed
-            theta-=axes[0]*math.radians(45.0)*elapsed
-            radius=max(70.0,min(self.arm_model.max_reach*.95,radius))
-            target_xyz=np.array([radius*math.cos(theta),radius*math.sin(theta),z])
+            target_xyz=np.array([x+axes[0]*25.0*elapsed,y+axes[1]*25.0*elapsed,z])
         elif arm_mode=='RX_RY':
             target_angles[3]=max(0.0,min(180.0,target_angles[3]-axes[1]*30.0*elapsed))
             gripper=max(10.0,min(75.0,gripper-axes[0]*30.0*elapsed))
@@ -435,7 +475,7 @@ class Engine(threading.Thread):
             if p.get('power_pending') and self.source == 'COCO':
                 self.handle('power', bool(p.get('power_enable')))
 
-        active = (self.source == 'COCO' and p.get('mode') == 'B'
+        active = (self.source == 'COCO' and p.get('mode') in ('A','B','C')
                   and not p.get('menu_open') and not p.get('debug_open'))
         centered = all(abs(p.get(k, 0)) <= 10 for k in (
             'agv_filtered_x', 'agv_filtered_y',
@@ -519,11 +559,13 @@ class Engine(threading.Thread):
                             if (isinstance(arm_channels,list) and len(arm_channels)==6
                                     and all(isinstance(value,(int,float)) and math.isfinite(value) for value in arm_channels)):
                                 self.arm_angles=np.array([arm_channels[0],arm_channels[1],arm_channels[2],arm_channels[4]],dtype=float)
+                                self.arm_rotation=float(arm_channels[3])
                                 self.arm_gripper=float(arm_channels[5])
                                 self.arm_busy=bool(t.get('arm_busy',0))
                                 if not self.arm_busy:
                                     self.arm_target_angles=self.arm_angles.copy()
                                     self.arm_target_gripper=self.arm_gripper
+                                    self.arm_target_rotation=self.arm_rotation
                                     self.arm_model.last_ik_theta=self.arm_model.convert_angles(self.arm_angles)
                             if not t['armed'] and (self.live or self.primitive):self.halt()
                             if self.capture:
@@ -685,6 +727,8 @@ class Window(QtWidgets.QMainWindow):
         emergency.setStyleSheet('background:#c6283c;color:white;font-size:18px;font-weight:bold;padding:12px;')
         self.button(safety,'Desbloquear E-STOP',lambda:self.global_stop('estop_reset'))
         self.button(safety,'Dar control a COCO',lambda:self.source.setCurrentText('COCO'))
+        self.arm_send_button=self.button(safety,'Enviar pose del brazo',self.send_arm_pose)
+        self.arm_send_button.setToolTip('Envía al AGV la pose válida del panel Brazo · V7.')
         self.button(safety,'Recuperar control PC',lambda:self.source.setCurrentText('PC'))
         self.cut_loss=QtWidgets.QCheckBox('Apagar relays al perder comunicación')
         self.cut_loss.setChecked(bool(self.engine.runtime['cut_relays_on_loss']))
@@ -856,8 +900,7 @@ class Window(QtWidgets.QMainWindow):
         duration_form=QtWidgets.QFormLayout()
         self.arm_duration=QtWidgets.QSpinBox();self.arm_duration.setRange(100,10000);self.arm_duration.setSingleStep(100);self.arm_duration.setValue(2000);self.arm_duration.setSuffix(' ms')
         duration_form.addRow('Duración de movimiento',self.arm_duration);layout.addLayout(duration_form)
-        self.arm_send_button=self.button(layout,'ENVIAR POSE SIMULADA AL AGV',self.send_arm_pose)
-        layout.addWidget(QtWidgets.QLabel('CH3 giro de muñeca permanece en 90°. COCO usa su deadman; STOP/E-STOP cancela la interpolación y mantiene el último PWM.'))
+        layout.addWidget(QtWidgets.QLabel('El preview PC no modela CH3 (inicia en 90°); COCO modo Joint controla ese servo. COCO usa deadman; STOP/E-STOP cancela la interpolación.'))
         layout.addStretch()
         self.update_arm_preview()
     def toggle_arm_mode(self,*_):

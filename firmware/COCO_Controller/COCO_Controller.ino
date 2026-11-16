@@ -105,13 +105,14 @@ int consumeEncoder(){
 enum CocoPage:uint8_t{PAGE_MAIN,PAGE_MENU,PAGE_DEBUG};
 enum CocoItem:uint8_t{ITEM_POWER,ITEM_MODE,ITEM_SPEED,ITEM_FEEL,ITEM_DEBUG,ITEM_RESET,ITEM_EXIT,ITEM_COUNT};
 CocoPage page=PAGE_MAIN;
-int selected=0,debugTab=0,controlMode=1,speedSetting=0,armFeel=0;
+int selected=0,debugTab=0,controlMode=1,speedSetting=0,armFeel=0,selectedArmJoint=0;
 bool rotationMode=false,gripMode=false,armCenterRequired=false;
 bool motionEnabled=false,releaseSeen=false,menuWaitRelease=false,navigationReady=false;
 uint32_t navRepeatAt=0;bool wasReady=false;
 float zChange=0,gripChange=0;
-const char* MODE_NAMES[]={"Joint","Gamepad","TCP"};
+const char* MODE_NAMES[]={"Joint","Gamepad","TCP=B"};
 const char* SPEED_NAMES[]={"Low","Medium","High"};
+const char* JOINT_NAMES[]={"Base","Shoulder","Elbow","Wrist R","Wrist E","Grip"};
 int wrapIndex(int n,int count){return(n%count+count)%count;}
 void lockMotion(){motionEnabled=false;releaseSeen=false;}
 
@@ -126,7 +127,8 @@ char rx[180],tx[950];size_t rxN=0,txN=0,txOffset=0;
 bool rxOverflow=false;uint32_t txStarted=0,lastPacket=0;
 bool linkFresh(){return pythonClient&&pythonClient.connected()&&stateValid&&millis()-stateAt<1500;}
 bool robotReady(){return linkFresh()&&pythonControl&&agvFresh&&agvArmed;}
-bool allowed(){return motionEnabled&&robotReady()&&deadman.held()&&page==PAGE_MAIN&&controlMode==1;}
+bool allowed(){return motionEnabled&&robotReady()&&deadman.held()&&page==PAGE_MAIN&&controlMode>=0&&controlMode<3&&!armCenterRequired;}
+bool driveAllowed(){return allowed()&&controlMode!=0;}
 int thresholdDirection(int value,int previous){
   if(previous && value*previous>=RELEASE_PERCENT)return previous;
   return abs(value)>=ACTIVATE_PERCENT?(value>0?1:-1):0;
@@ -185,17 +187,18 @@ void serviceTCP(){
     }else if(!rxOverflow){if(rxN<sizeof(rx)-1)rx[rxN++]=c;else{rxOverflow=true;stateValid=false;lockMotion();}}
   }
   if(!txN&&millis()-lastPacket>=50){
-    lastPacket=millis();bool enabled=allowed();
+    lastPacket=millis();bool enabled=allowed(),driving=driveAllowed();
     int n=snprintf(tx,sizeof(tx),
       "{\"type\":\"coco\",\"control_style\":\"manual90\",\"boot_id\":%lu,\"seq\":%lu,"
       "\"mode\":\"%c\",\"menu_open\":%d,\"debug_open\":%d,\"deadman\":%d,\"motion_enabled\":%d,"
       "\"arm_filtered_x\":%d,\"arm_filtered_y\":%d,\"agv_filtered_x\":%d,\"agv_filtered_y\":%d,"
+      "\"arm_joint_index\":%d,"
       "\"drive\":%d,\"steer\":%d,\"arm_mode\":\"%s\",\"encoder_mode\":\"%s\","
       "\"distance_cm\":0,\"turn_deg\":0,\"turn_jog\":0,\"z_change_mm\":%.2f,\"grip_change_pct\":%.2f,"
       "\"speed_level\":%d,\"power_request_id\":%lu,\"power_pending\":%d,\"power_enable\":%d}\n",
       (unsigned long)bootId,(unsigned long)++seq,'A'+controlMode,page==PAGE_MENU,page==PAGE_DEBUG,
       deadman.held(),enabled,axes[0].output,axes[1].output,axes[2].output,axes[3].output,
-      enabled?driveRequest():0,enabled?steerRequest():0,rotationMode?"RX_RY":"XY",gripMode?"GRIP":"Z",
+      selectedArmJoint,driving?driveRequest():0,driving?steerRequest():0,rotationMode?"RX_RY":"XY",gripMode?"GRIP":"Z",
       zChange,gripChange,speedSetting,(unsigned long)powerId,powerPending,powerEnable);
     if(n<=0||(size_t)n>=sizeof(tx)){closePython("TCP packet overflow");return;}
     txN=n;txOffset=0;txStarted=millis();
@@ -210,7 +213,7 @@ void serviceTCP(){
 }
 
 void updateControls(int clicks,uint32_t now){
-  if(!deadman.held()||page!=PAGE_MAIN||controlMode!=1||!robotReady())motionEnabled=false;
+  if(!deadman.held()||page!=PAGE_MAIN||!robotReady())motionEnabled=false;
   if(page==PAGE_DEBUG){
     if(deadman.rose)debugTab=(debugTab+1)%6;
     if(agvButton.fell){page=PAGE_MENU;navigationReady=false;lockMotion();}return;
@@ -235,12 +238,13 @@ void updateControls(int clicks,uint32_t now){
   }
   if(!robotReady())releaseSeen=false;
   if(deadman.released()&&robotReady())releaseSeen=true;
-  if(deadman.rose){motionEnabled=releaseSeen&&allCentered()&&controlMode==1&&robotReady();releaseSeen=false;}
-  if(controlMode==1&&armButton.rose){rotationMode=!rotationMode;armCenterRequired=true;}
+  if(deadman.rose){motionEnabled=releaseSeen&&allCentered()&&controlMode>=0&&controlMode<3&&robotReady();releaseSeen=false;}
+  if(controlMode>0&&armButton.rose){rotationMode=!rotationMode;armCenterRequired=true;}
   if(axes[0].centered()&&axes[1].centered())armCenterRequired=false;
   if(encoderButton.rose&&deadman.released()&&!agvArmed){requestPower();return;}
-  if(controlMode==1&&encoderButton.rose){gripMode=!gripMode;clicks=0;}
-  if(allowed()&&clicks){float step=armFeel==0?0.5f:1.0f;if(gripMode)gripChange+=clicks*step;else zChange+=clicks*step;}
+  if(controlMode>0&&encoderButton.rose){gripMode=!gripMode;clicks=0;}
+  if(controlMode==0&&clicks)selectedArmJoint=wrapIndex(selectedArmJoint+clicks,6);
+  else if(allowed()&&clicks){float step=armFeel==0?0.5f:1.0f;if(gripMode)gripChange+=clicks*step;else zChange+=clicks*step;}
 }
 
 void lineAt(int y,const char* text){oled.setCursor(0,y);for(int i=0;text[i]&&i<21;i++)oled.write(text[i]);}
@@ -254,14 +258,15 @@ void drawMain(){
     else{lineAt(24,"IP: waiting for WiFi");lineAt(36,"TCP port: 4210");lineAt(46,"Connecting...");}
     lineAt(56,"Hold B: MENU");return;
   }
-  snprintf(text,sizeof(text),"A:%s ENC:%s",rotationMode?"RxRy":"XY",gripMode?"Grip":"Z");lineAt(12,text);
-  int d=allowed()?driveRequest():0,r=allowed()?steerRequest():0;
-  snprintf(text,sizeof(text),"AGV:%s",r>0?"LEFT":r<0?"RIGHT":d>0?"FORWARD":d<0?"REVERSE":"STOP");lineAt(22,text);
+  if(controlMode==0){snprintf(text,sizeof(text),"Joint: %s",JOINT_NAMES[selectedArmJoint]);lineAt(12,text);}
+  else{snprintf(text,sizeof(text),"A:%s ENC:%s",rotationMode?"RxRy":"XY",gripMode?"Grip":"Z");lineAt(12,text);}
+  int d=driveAllowed()?driveRequest():0,r=driveAllowed()?steerRequest():0;
+  snprintf(text,sizeof(text),"AGV:%s",controlMode==0?"ARM":r>0?"LEFT":r<0?"RIGHT":d>0?"FORWARD":d<0?"REVERSE":"STOP");lineAt(22,text);
   if(yawValid&&millis()-yawAt<1500){
     snprintf(text,sizeof(text),"Yaw:%+.1f T:%+.2f",shownYaw,shownTurns);lineAt(32,text);
     snprintf(text,sizeof(text),"Turn d:%+.1f deg",shownDelta);lineAt(42,text);
   }else{lineAt(32,"IMU: NO FRESH DATA");snprintf(text,sizeof(text),"Pose yaw:%+.1f",agvYaw);lineAt(42,text);}
-  const char* why=allowed()?"LIVE":!pythonControl?"Select COCO on PC":!agvFresh?"AGV offline":!agvArmed?"Robot power OFF":controlMode!=1?"Select Gamepad B":!deadman.held()?"Hold DM to drive":!allCentered()?"Release DM + center":"Release / press DM";
+  const char* why=allowed()?(controlMode==0?"JOINT LIVE":"LIVE"):!pythonControl?"Select COCO on PC":!agvFresh?"AGV offline":!agvArmed?"Robot power OFF":!deadman.held()?"Hold DM to drive":armCenterRequired?"Center arm stick":!allCentered()?"Release DM + center":"Release / press DM";
   lineAt(56,why);
 }
 void drawMenu(){
@@ -289,7 +294,7 @@ void drawDebug(){
     case 1:
       snprintf(t,sizeof(t),"A:%+d %+d",axes[0].output,axes[1].output);lineAt(12,t);
       snprintf(t,sizeof(t),"B:%+d %+d",axes[2].output,axes[3].output);lineAt(22,t);
-      snprintf(t,sizeof(t),"D:%d R:%d",driveRequest(),steerRequest());lineAt(32,t);lineAt(42,"Trigger 70% / off 45%");break;
+      snprintf(t,sizeof(t),"D:%d R:%d",driveAllowed()?driveRequest():0,driveAllowed()?steerRequest():0);lineAt(32,t);lineAt(42,"Trigger 70% / off 45%");break;
     case 2:
       snprintf(t,sizeof(t),"SW A:%d B:%d E:%d",armButton.down,agvButton.down,encoderButton.down);lineAt(12,t);
       snprintf(t,sizeof(t),"ENC:%ld d:%d",(long)encoderTotal,millis()-encoderDeltaAt<1000?encoderDelta:0);lineAt(22,t);
@@ -301,7 +306,11 @@ void drawDebug(){
         snprintf(t,sizeof(t),"L:%ld R:%ld",ticksL,ticksR);lineAt(32,t);
         snprintf(t,sizeof(t),"IMU OK:%d d:%+.1f",yawValid&&millis()-yawAt<1500,shownDelta);lineAt(42,t);
       }else{lineAt(12,"AGV NO RECENT DATA");lineAt(22,"D:? R:? Speed:?");}break;
-    case 4:lineAt(12,"TCP X:? Y:? Z:?");lineAt(22,"Rx:? Ry:? Grip:?");lineAt(32,"Arm not integrated");lineAt(42,"IK:? Limits:?");break;
+    case 4:
+      snprintf(t,sizeof(t),"Mode:%c %s",'A'+controlMode,MODE_NAMES[controlMode]);lineAt(12,t);
+      snprintf(t,sizeof(t),"Joint:%s",JOINT_NAMES[selectedArmJoint]);lineAt(22,t);
+      snprintf(t,sizeof(t),"Arm stick Y:%+d",axes[1].output);lineAt(32,t);
+      lineAt(42,"Pose / IK via PC");break;
     case 5:
       snprintf(t,sizeof(t),"WiFi:%s",WiFi.status()==WL_CONNECTED?"ON":"OFF");lineAt(12,t);
       if(WiFi.status()==WL_CONNECTED)lineAt(22,WiFi.localIP().toString().c_str());else lineAt(22,"IP: waiting");
@@ -336,6 +345,6 @@ void loop(){
   if(wifi&&!previousWifi){Serial.print("COCO IP: ");Serial.println(WiFi.localIP());}previousWifi=wifi;
   if(!wifi&&now-retryAt>=15000){retryAt=now;WiFi.reconnect();}
   if(now-displayAt>=100){displayAt=now;updateDisplay();}
-  if(now-serialAt>=500 && Serial && Serial.availableForWrite()>160){serialAt=now;Serial.printf("PC:%d OwnerCOCO:%d AGV:%d Armed:%d DM:%d LIVE:%d D:%d R:%d\n",linkFresh(),pythonControl,agvFresh,agvArmed,deadman.held(),allowed(),allowed()?driveRequest():0,allowed()?steerRequest():0);}
+  if(now-serialAt>=500 && Serial && Serial.availableForWrite()>160){serialAt=now;Serial.printf("PC:%d OwnerCOCO:%d AGV:%d Armed:%d DM:%d LIVE:%d D:%d R:%d\n",linkFresh(),pythonControl,agvFresh,agvArmed,deadman.held(),allowed(),driveAllowed()?driveRequest():0,driveAllowed()?steerRequest():0);}
   delay(1);
 }

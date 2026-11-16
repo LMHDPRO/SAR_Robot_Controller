@@ -107,7 +107,7 @@ class ArmKinematics:
 
     def enforce_safety_zone(self, target_xyz, minimum_radius=70.0):
         x, y, z = np.asarray(target_xyz, dtype=float)
-        safe_reach = self.max_reach * 0.98
+        safe_reach = self.max_reach * 0.95
         radius = float(np.hypot(x, y))
         if radius > safe_reach:
             x, y = x / radius * safe_reach, y / radius * safe_reach

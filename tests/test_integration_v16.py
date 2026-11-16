@@ -23,6 +23,19 @@ class IntegrationTests(unittest.TestCase):
         for angles in ([90,126.5,74.2,106],[45,90,90,90],[130,80,110,65]):
             np.testing.assert_allclose(a.compute_fk(angles)[0],b.compute_fk(angles)[0])
 
+    def test_gamepad_safe_target_matches_v7_preview_ik(self):
+        sar, preview = ArmKinematics(), RobotKinematics()
+        start = sar.startup_angles.copy()
+        target = sar.enforce_safety_zone(sar.compute_fk(start)[0] + [2.5, 0.0, 0.0])
+        sar.last_ik_theta = sar.convert_angles(start)
+        preview.last_ik_theta = preview.convert_angles(start)
+
+        sar_ok, sar_angles, _ = sar.compute_ik(target)
+        preview_ok, preview_angles, _ = preview.compute_ik(target)
+
+        self.assertTrue(sar_ok and preview_ok)
+        np.testing.assert_allclose(sar_angles, preview_angles, atol=1e-6)
+
     def test_stop_clears_every_physical_source_and_recovery(self):
         with patch.object(ArmWorkspace,'_load_vision_config'):
             arm=ArmWorkspace(Engine())
@@ -64,6 +77,9 @@ class IntegrationTests(unittest.TestCase):
             w.workspaces.setCurrentIndex(1);APP.processEvents()
             self.assertFalse(w.plot.isVisible())
             self.assertTrue(w.arm_workspace.canvas.isVisible())
+            self.assertTrue(w.arm_send_button.isVisible() and w.arm_send_button.isEnabled())
+            w.workspaces.setCurrentIndex(2);APP.processEvents()
+            self.assertTrue(w.arm_send_button.isVisible() and w.arm_send_button.isEnabled())
             self.assertTrue(w.ip.isVisible() and w.status.isVisible())
             self.assertLessEqual(w.height(),860)
             w.cameras.save=lambda:None

@@ -53,6 +53,17 @@ class ArmKinematicsTests(unittest.TestCase):
         self.assertAlmostEqual(np.hypot(*safe_position[:2]), 70.0)
         self.assertLessEqual(np.linalg.norm(safe_position), self.arm.max_reach * 0.98)
 
+    def test_safety_zone_projects_startup_pose_to_a_reachable_ik_target(self):
+        startup_position = self.arm.compute_fk(self.arm.startup_angles)[0]
+        target = self.arm.enforce_safety_zone(startup_position + [2.5, 0.0, 0.0])
+
+        success, angles, error = self.arm.compute_ik(target)
+
+        self.assertTrue(success)
+        self.assertLessEqual(error, 2.0)
+        self.assertTrue(np.all(angles >= 0.0))
+        self.assertTrue(np.all(angles <= 180.0))
+
 
 if __name__ == "__main__":
     unittest.main()
