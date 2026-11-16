@@ -1,6 +1,6 @@
 [
   {
-    "url": "192.168.3.17",
+    "url": "http://192.168.3.18:81/stream",
     "dictionary": "DICT_4X4_50",
     "marker_mm": 35.0,
     "calibration": "",

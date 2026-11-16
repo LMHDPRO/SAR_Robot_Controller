@@ -11,7 +11,7 @@
 #include <errno.h>
 #include <Preferences.h>
 const char* WIFI_SSID="No_Disponible";
-const char* WIFI_PASSWORD="CONFIGURAR_CLAVE_WIFI";
+const char* WIFI_PASSWORD="Mapache2003";
 constexpr int ENA=9, ENB=18, IN1=10, IN2=17, IN3=21, IN4=38;
 constexpr int ENC1_A=5,ENC1_B=6,ENC2_A=7,ENC2_B=8;
 constexpr int RELAY1=48,RELAY2=47;

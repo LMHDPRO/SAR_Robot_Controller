@@ -9,7 +9,7 @@
 #include <errno.h>
 
 const char* WIFI_SSID="No_Disponible";
-const char* WIFI_PASSWORD="CONFIGURAR_CLAVE_WIFI";
+const char* WIFI_PASSWORD="Mapache2003";
 constexpr int ARM_X=2,ARM_Y=1,ARM_SW=5;
 constexpr int AGV_X=4,AGV_Y=3,AGV_SW=6;
 constexpr int ENC_CLK=7,ENC_DT=8,ENC_SW=9,DM_PIN=10;
