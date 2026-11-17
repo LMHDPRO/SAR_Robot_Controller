@@ -21,6 +21,8 @@ class ArmWorkspace(MainWindow):
         self.chk_pendant.setChecked(False)
         self.chk_pendant.setEnabled(False)
         self.chk_pendant.setText('COCO: seleccionar en la barra global')
+        self.btn_send_manual.setText('Enviar pose (prueba)')
+        self.btn_send_manual.setToolTip('Envía la pose actual una sola vez; para control continuo usa Live Robot Arm movement.')
         self.slider_pinza.setMinimum(10)
         self.btn_stop_path.clicked.connect(self.stop_robot)
         self.camera_source.setText(self.engine.runtime.get('arm_camera_url', ''))
@@ -114,6 +116,8 @@ class ArmWorkspace(MainWindow):
         self.cancel_motion();self.engine.post('stop',False)
 
     def _send_to_arduino(self,live_mode=False):
+        if not live_mode and self.chk_live.isChecked():
+            self._show_msg('Desactiva Live Robot Arm movement para enviar una pose de prueba.',True);return
         reason=self.block_reason()
         if reason:
             self.cancel_motion();self._show_msg(reason,True);return

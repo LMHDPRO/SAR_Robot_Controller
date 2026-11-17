@@ -10,8 +10,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 class CameraPanel(QtWidgets.QGroupBox):
     def __init__(self,title,config,parent=None,arm_camera_api=False):
         super().__init__(title,parent)
-        self.proc=QtCore.QProcess(self);self.buffer=b'';self.last_frame=0;self.stopping=False
-        self.arm_camera_api=arm_camera_api;self.received_frame=False
+        self.proc=QtCore.QProcess(self);self.buffer=b'';self.last_frame=0;self.last_activity=0;self.stopping=False
+        self.arm_camera_api=arm_camera_api;self.received_frame=False;self.restart_on_finish=False
         self.proc.readyReadStandardOutput.connect(self.read_output)
         self.proc.readyReadStandardError.connect(lambda:self.proc.readAllStandardError())
         self.proc.finished.connect(self.finished)
@@ -24,6 +24,12 @@ class CameraPanel(QtWidgets.QGroupBox):
             form.labelForField(self.url).setText('Arm ESP32-S3 IP / URL')
         self.dictionary=QtWidgets.QComboBox();self.dictionary.addItems(['DICT_4X4_50','DICT_4X4_100','DICT_5X5_100','DICT_6X6_250'])
         self.dictionary.setCurrentText(config.get('dictionary','DICT_4X4_50'));form.addRow('Diccionario ArUco',self.dictionary)
+        self.rotation=QtWidgets.QComboBox()
+        for label,degrees in [('Sin giro (0°)',0),('90° horario',90),('90° antihorario',-90),('180°',180)]:
+            self.rotation.addItem(label,degrees)
+        rotation_index=self.rotation.findData(config.get('rotation',0))
+        self.rotation.setCurrentIndex(rotation_index if rotation_index>=0 else 0)
+        form.addRow('Rotación del preview',self.rotation)
         self.marker=QtWidgets.QDoubleSpinBox();self.marker.setRange(1,1000);self.marker.setValue(config.get('marker_mm',35));self.marker.setSuffix(' mm');form.addRow('Lado exterior marcador',self.marker)
         self.calibration=QtWidgets.QLineEdit(config.get('calibration',''));form.addRow('Calibración .npz',self.calibration)
         select=QtWidgets.QPushButton('Elegir calibración');select.clicked.connect(self.select_calibration);box.addWidget(select)
@@ -38,13 +44,13 @@ class CameraPanel(QtWidgets.QGroupBox):
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch);self.table.setMaximumHeight(160);box.addWidget(self.table)
         self.watchdog=QtCore.QTimer(self);self.watchdog.timeout.connect(self.check_age);self.watchdog.start(500)
 
-    def config(self):return {'url':self.url.text().strip(),'dictionary':self.dictionary.currentText(),'marker_mm':self.marker.value(),'calibration':self.calibration.text().strip(),'arm_camera_api':self.arm_camera_api}
+    def config(self):return {'url':self.url.text().strip(),'dictionary':self.dictionary.currentText(),'marker_mm':self.marker.value(),'calibration':self.calibration.text().strip(),'rotation':self.rotation.currentData(),'arm_camera_api':self.arm_camera_api}
     def select_calibration(self):
         path,_=QtWidgets.QFileDialog.getOpenFileName(self,'Calibración de esta cámara','','NumPy (*.npz)')
         if path:self.calibration.setText(path)
     def start(self):
         if self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning:return
-        self.stopping=False;self.buffer=b'';self.last_frame=time.monotonic()
+        self.stopping=False;self.restart_on_finish=False;self.buffer=b'';self.last_frame=time.monotonic();self.last_activity=self.last_frame
         self.received_frame=False
         self.status.setText('Conectando…');self.connect_button.setEnabled(False)
         self.proc.start(sys.executable,['-u',str(Path(__file__).with_name('camera_worker.py')),json.dumps(self.config())])
@@ -55,14 +61,23 @@ class CameraPanel(QtWidgets.QGroupBox):
     def kill_if_stopping(self):
         if self.stopping and self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning:self.proc.kill()
     def finished(self,*_):
+        restart=self.restart_on_finish and not self.stopping
+        self.restart_on_finish=False
         self.connect_button.setEnabled(True);self.table.setRowCount(0)
         self.preview.clear();self.preview.setText('Sin imagen · desconectada')
         if not self.stopping:self.status.setText('Desconectada: '+self.status.text())
+        if restart:
+            self.status.setText('Worker de cámara bloqueado; reintentando conexión')
+            QtCore.QTimer.singleShot(1000,self.restart_if_needed)
+    def restart_if_needed(self):
+        if not self.stopping and self.proc.state()==QtCore.QProcess.ProcessState.NotRunning:self.start()
     def check_age(self):
-        timeout=25 if self.arm_camera_api and not self.received_frame else 4
-        if self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning and time.monotonic()-self.last_frame>timeout:
+        timeout=30
+        if self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning and time.monotonic()-self.last_activity>timeout:
             self.table.setRowCount(0);self.preview.clear();self.preview.setText('Sin imagen reciente')
-            self.status.setText(f'No camera frames within {timeout} s; reconnect');self.proc.kill()
+            self.status.setText(f'Sin actividad de cámara durante {timeout} s; cerrando el worker')
+            self.restart_on_finish=True
+            self.proc.kill()
     def read_output(self):
         self.buffer+=bytes(self.proc.readAllStandardOutput())
         if len(self.buffer)>4000000:
@@ -72,13 +87,17 @@ class CameraPanel(QtWidgets.QGroupBox):
         if not lines:return
         try:
             packet=json.loads(lines[-1])
+            self.last_activity=time.monotonic()
             if 'error' in packet:self.status.setText(packet['error']);return
             if 'status' in packet:self.status.setText(packet['status']);return
             image=QtGui.QImage.fromData(base64.b64decode(packet['jpeg']))
             if image.isNull():return
             self.last_frame=time.monotonic()
             self.received_frame=True
-            pixmap=QtGui.QPixmap.fromImage(image).scaled(self.preview.size(),QtCore.Qt.AspectRatioMode.KeepAspectRatio,QtCore.Qt.TransformationMode.SmoothTransformation)
+            pixmap=QtGui.QPixmap.fromImage(image)
+            scale=min(1.0,self.preview.width()/pixmap.width(),self.preview.height()/pixmap.height())
+            pixmap=pixmap.scaled(max(1,round(pixmap.width()*scale)),max(1,round(pixmap.height()*scale)),
+                                 QtCore.Qt.AspectRatioMode.KeepAspectRatio,QtCore.Qt.TransformationMode.FastTransformation)
             self.preview.setPixmap(pixmap)
             rows=packet['detections'];self.table.setRowCount(len(rows))
             for i,row in enumerate(rows):
@@ -90,7 +109,7 @@ class CameraPanel(QtWidgets.QGroupBox):
             self.status.setText(f'ONLINE · {len(rows)} marcadores · '+('calibrada' if packet['metric'] else 'sin calibración: solo IDs/píxeles')+(' · '+errors[0] if errors else ''))
         except (ValueError,KeyError,TypeError):self.status.setText('Frame inválido')
     def shutdown(self):
-        self.watchdog.stop();self.proc.kill();self.proc.waitForFinished(1000)
+        self.stopping=True;self.watchdog.stop();self.proc.kill();self.proc.waitForFinished(1000)
 
 
 class CamerasPage(QtWidgets.QWidget):

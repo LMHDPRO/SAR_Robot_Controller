@@ -55,31 +55,60 @@ def emit(value):
     print(json.dumps(value,separators=(',',':')),flush=True)
 
 
+def rotate_preview(frame,rotation,cv2_module=cv2):
+    rotations={
+        90:cv2_module.ROTATE_90_CLOCKWISE,
+        -90:cv2_module.ROTATE_90_COUNTERCLOCKWISE,
+        180:cv2_module.ROTATE_180,
+    }
+    return cv2_module.rotate(frame,rotations[rotation]) if rotation in rotations else frame
+
+
 def run(config):
     calibration=load_calibration(config.get('calibration',''))
     marker_mm=float(config['marker_mm'])
     if not np.isfinite(marker_mm) or marker_mm<=0:raise ValueError('Tamaño de marcador inválido')
+    rotation=int(config.get('rotation',0))
+    if rotation not in (0,90,-90,180):raise ValueError('Rotación inválida: use 0, 90, -90 o 180 grados')
     dictionary=cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco,config['dictionary']))
     detector=cv2.aruco.ArucoDetector(dictionary,cv2.aruco.DetectorParameters())
     source=config['url'].strip()
-    if config.get('arm_camera_api'):
-        source=prepare_arm_stream(source,status=lambda message:emit({'status':message}))
-    if not source.startswith(('http://','https://','rtsp://')):raise ValueError('Introducir URL http(s) o rtsp de la cámara ESP32')
-    cap=cv2.VideoCapture(source,cv2.CAP_FFMPEG,[cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,3000,cv2.CAP_PROP_READ_TIMEOUT_MSEC,2000])
-    if not cap.isOpened():raise RuntimeError('No se pudo abrir el stream de la ESP32-S3')
-    cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
-    try:
-        while True:
-            start=time.monotonic()
-            ok,frame=cap.read()
-            if not ok:raise RuntimeError('Stream perdido; reconectar cámara')
-            rows=detect(frame,detector,marker_mm,calibration)
-            h,w=frame.shape[:2]
-            preview=cv2.resize(frame,(min(640,w),round(h*min(640,w)/w)))
-            ok,jpeg=cv2.imencode('.jpg',preview,[cv2.IMWRITE_JPEG_QUALITY,75])
-            if ok:emit({'jpeg':base64.b64encode(jpeg).decode(),'detections':rows,'metric':calibration is not None})
-            time.sleep(max(0,.1-(time.monotonic()-start)))
-    finally:cap.release()
+    if not config.get('arm_camera_api') and not source.startswith(('http://','https://','rtsp://')):
+        raise ValueError('Introducir URL http(s) o rtsp de la cámara ESP32')
+    attempt=0
+    while True:
+        cap=None
+        try:
+            stream=prepare_arm_stream(source,status=lambda message:emit({'status':message})) if config.get('arm_camera_api') else source
+            if not stream.startswith(('http://','https://','rtsp://')):
+                raise ValueError('Introducir URL http(s) o rtsp de la cámara ESP32')
+            emit({'status':'Abriendo stream de cámara'})
+            cap=cv2.VideoCapture(stream,cv2.CAP_FFMPEG,[cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,3000,cv2.CAP_PROP_READ_TIMEOUT_MSEC,2000])
+            if not cap.isOpened():raise RuntimeError('No se pudo abrir el stream de la ESP32-S3')
+            cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
+            emit({'status':'Cámara conectada; esperando imagen'})
+            while True:
+                start=time.monotonic()
+                ok,frame=cap.read()
+                if not ok:raise RuntimeError('Se perdió el stream de cámara')
+                rows=detect(frame,detector,marker_mm,calibration)
+                preview=rotate_preview(frame,rotation)
+                h,w=preview.shape[:2]
+                scale=min(1.0,640/max(w,h))
+                if scale<1.0:
+                    preview=cv2.resize(preview,(max(1,round(w*scale)),max(1,round(h*scale))),interpolation=cv2.INTER_AREA)
+                ok,jpeg=cv2.imencode('.jpg',preview,[cv2.IMWRITE_JPEG_QUALITY,75])
+                if ok:
+                    emit({'jpeg':base64.b64encode(jpeg).decode(),'detections':rows,'metric':calibration is not None})
+                    attempt=0
+                time.sleep(max(0,.1-(time.monotonic()-start)))
+        except (OSError,RuntimeError,cv2.error) as exc:
+            attempt+=1
+            delay=min(8.0,.5*(2**min(attempt-1,4)))
+            emit({'status':f'Cámara desconectada: {exc}. Reintento en {delay:g} s'})
+            time.sleep(delay)
+        finally:
+            if cap is not None:cap.release()
 
 
 if __name__=='__main__':

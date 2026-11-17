@@ -121,6 +121,7 @@ bool serverStarted=false,stateValid=false,pythonControl=false,agvFresh=false,agv
 uint32_t stateAt=0,bootId=0,seq=0,powerId=0,powerAt=0;
 bool powerPending=false,powerEnable=false;
 float agvTravel=0,agvYaw=0,agvSpeed=0;
+float armX=0,armY=0,armZ=0;
 float shownYaw=0,shownDelta=0,shownTurns=0;int yawValid=0;uint32_t yawAt=0;
 long ticksL=0,ticksR=0;int imuPresent=0;
 char rx[180],tx[950];size_t rxN=0,txN=0,txOffset=0;
@@ -160,8 +161,8 @@ void parsePython(){
   if(!strcmp(rx,"CTRL:0")){pythonControl=false;lockMotion();return;}
   if(!strncmp(rx,"STATE:",6)){
     float x,y,z,a,b,g,v;int fresh,armed,fault,n=0;
-    if(sscanf(rx+6,"%f,%f,%f,%f,%f,%f,%f,%d,%d,%d%n",&x,&y,&z,&a,&b,&g,&v,&fresh,&armed,&fault,&n)==10&&n==(int)strlen(rx+6)){
-      stateValid=true;stateAt=millis();agvFresh=fresh==1&&fault==0;agvArmed=armed==1;
+    if(sscanf(rx+6,"%f,%f,%f,%f,%f,%f,%f,%d,%d,%d%n",&x,&y,&z,&a,&b,&g,&v,&fresh,&armed,&fault,&n)==10&&n==(int)strlen(rx+6)&&isfinite(x)&&isfinite(y)&&isfinite(z)&&isfinite(v)){
+      armX=x;armY=y;armZ=z;stateValid=true;stateAt=millis();agvFresh=fresh==1&&fault==0;agvArmed=armed==1;
       if(powerPending&&agvFresh&&agvArmed==powerEnable)powerPending=false;
     }
   }else if(!strncmp(rx,"AGV:",4)){
@@ -261,11 +262,9 @@ void drawMain(){
   if(controlMode==0){snprintf(text,sizeof(text),"Joint: %s",JOINT_NAMES[selectedArmJoint]);lineAt(12,text);}
   else{snprintf(text,sizeof(text),"A:%s ENC:%s",rotationMode?"RxRy":"XY",gripMode?"Grip":"Z");lineAt(12,text);}
   int d=driveAllowed()?driveRequest():0,r=driveAllowed()?steerRequest():0;
-  snprintf(text,sizeof(text),"AGV:%s",controlMode==0?"ARM":r>0?"LEFT":r<0?"RIGHT":d>0?"FORWARD":d<0?"REVERSE":"STOP");lineAt(22,text);
-  if(yawValid&&millis()-yawAt<1500){
-    snprintf(text,sizeof(text),"Yaw:%+.1f T:%+.2f",shownYaw,shownTurns);lineAt(32,text);
-    snprintf(text,sizeof(text),"Turn d:%+.1f deg",shownDelta);lineAt(42,text);
-  }else{lineAt(32,"IMU: NO FRESH DATA");snprintf(text,sizeof(text),"Pose yaw:%+.1f",agvYaw);lineAt(42,text);}
+  snprintf(text,sizeof(text),"X:%+.0f Y:%+.0f mm",armX,armY);lineAt(22,text);
+  snprintf(text,sizeof(text),"Z:%+.0f mm",armZ);lineAt(32,text);
+  snprintf(text,sizeof(text),"AGV:%s",controlMode==0?"ARM":r>0?"LEFT":r<0?"RIGHT":d>0?"FORWARD":d<0?"REVERSE":"STOP");lineAt(42,text);
   const char* why=allowed()?(controlMode==0?"JOINT LIVE":"LIVE"):!pythonControl?"Select COCO on PC":!agvFresh?"AGV offline":!agvArmed?"Robot power OFF":!deadman.held()?"Hold DM to drive":armCenterRequired?"Center arm stick":!allCentered()?"Release DM + center":"Release / press DM";
   lineAt(56,why);
 }
@@ -307,10 +306,10 @@ void drawDebug(){
         snprintf(t,sizeof(t),"IMU OK:%d d:%+.1f",yawValid&&millis()-yawAt<1500,shownDelta);lineAt(42,t);
       }else{lineAt(12,"AGV NO RECENT DATA");lineAt(22,"D:? R:? Speed:?");}break;
     case 4:
-      snprintf(t,sizeof(t),"Mode:%c %s",'A'+controlMode,MODE_NAMES[controlMode]);lineAt(12,t);
-      snprintf(t,sizeof(t),"Joint:%s",JOINT_NAMES[selectedArmJoint]);lineAt(22,t);
-      snprintf(t,sizeof(t),"Arm stick Y:%+d",axes[1].output);lineAt(32,t);
-      lineAt(42,"Pose / IK via PC");break;
+      snprintf(t,sizeof(t),"X:%+.1f Y:%+.1f",armX,armY);lineAt(12,t);
+      snprintf(t,sizeof(t),"Z:%+.1f mm",armZ);lineAt(22,t);
+      snprintf(t,sizeof(t),"Mode:%c %s",'A'+controlMode,MODE_NAMES[controlMode]);lineAt(32,t);
+      snprintf(t,sizeof(t),"Joint:%s Stick:%+d",JOINT_NAMES[selectedArmJoint],axes[1].output);lineAt(42,t);break;
     case 5:
       snprintf(t,sizeof(t),"WiFi:%s",WiFi.status()==WL_CONNECTED?"ON":"OFF");lineAt(12,t);
       if(WiFi.status()==WL_CONNECTED)lineAt(22,WiFi.localIP().toString().c_str());else lineAt(22,"IP: waiting");

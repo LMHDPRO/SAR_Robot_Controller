@@ -110,7 +110,7 @@ class ArmControlTests(unittest.TestCase):
         packet.update(seq=3, arm_filtered_y=100)
         engine.process_pad(dict(packet), now + 0.15)
 
-        self.assertEqual(engine.robot.messages[-1], "ARM:90,126,74,90,103,75,150\n")
+        self.assertEqual(engine.robot.messages[-1], "ARM:90,126,74,90,104,75,150\n")
 
     def test_coco_joint_mode_controls_wrist_rotation_and_gripper(self):
         engine = self.ready_engine(owner="COCO")
@@ -147,11 +147,11 @@ class ArmControlTests(unittest.TestCase):
         self.assertAlmostEqual(engine.arm_target_gripper, 72.0)
         self.assertEqual(engine.robot.messages[-1], "ARM:90,126,74,93,106,72,150\n")
 
-    def test_coco_mode_c_uses_the_same_cartesian_ik_as_mode_b(self):
+    def test_coco_modes_b_and_c_follow_legacy_smooth_gamepad_motion(self):
         results = []
         for mode in ("B", "C"):
             engine = self.ready_engine(owner="COCO")
-            start = engine.arm_model.startup_angles + [0.0, -26.5, 25.8, -16.0]
+            start = engine.arm_model.startup_angles.copy()
             engine.arm_angles = start.copy()
             engine.arm_target_angles = start.copy()
             engine.arm_model.last_ik_theta = engine.arm_model.convert_angles(start)
@@ -179,14 +179,46 @@ class ArmControlTests(unittest.TestCase):
             packet.update(seq=2, deadman=1, motion_enabled=1)
             engine.process_pad(dict(packet), now + 0.05)
             packet.update(seq=3, arm_filtered_x=100)
-            engine.process_pad(dict(packet), now + 0.15)
+            engine.process_pad(dict(packet), now + 0.10)
 
-            expected_xyz = engine.arm_model.enforce_safety_zone(start_xyz + [2.5, 0.0, 0.0])
             actual_xyz = engine.arm_model.compute_fk(engine.arm_target_angles)[0]
-            np.testing.assert_allclose(actual_xyz, expected_xyz, atol=2.0)
+            self.assertLessEqual(np.linalg.norm(actual_xyz-start_xyz),5.1)
+            self.assertLess(abs(engine.arm_target_angles[0]-start[0]),2.0)
             results.append(engine.robot.messages[-1])
 
         self.assertEqual(results[0], results[1])
+
+    def test_coco_z_encoder_moves_arm_in_rx_ry_mode(self):
+        engine = self.ready_engine(owner="COCO")
+        start_xyz = engine.arm_model.compute_fk(engine.arm_target_angles)[0]
+        now = time.monotonic()
+        engine.last_ui = now
+        packet = {
+            "type": "coco",
+            "control_style": "manual90",
+            "boot_id": 1,
+            "seq": 1,
+            "mode": "B",
+            "deadman": 0,
+            "motion_enabled": 0,
+            "drive": 0,
+            "steer": 0,
+            "arm_mode": "RX_RY",
+            "encoder_mode": "Z",
+            "arm_filtered_x": 0,
+            "arm_filtered_y": 0,
+            "z_change_mm": 0,
+            "grip_change_pct": 0,
+        }
+        engine.process_pad(dict(packet), now)
+        packet.update(seq=2, deadman=1, motion_enabled=1)
+        engine.process_pad(dict(packet), now + 0.05)
+        packet.update(seq=3, z_change_mm=-20)
+        engine.process_pad(dict(packet), now + 0.10)
+
+        actual_xyz = engine.arm_model.compute_fk(engine.arm_target_angles)[0]
+        self.assertLess(actual_xyz[2], start_xyz[2])
+        self.assertLessEqual(np.linalg.norm(actual_xyz-start_xyz), 5.1)
 
 
 if __name__ == "__main__":

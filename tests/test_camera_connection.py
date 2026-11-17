@@ -82,11 +82,15 @@ class CameraIntegrationTests(unittest.TestCase):
         try:
             self.assertTrue(arm.config()['arm_camera_api'])
             self.assertFalse(agv.config()['arm_camera_api'])
-            arm.last_frame=time.monotonic()-6
+            self.assertEqual(arm.config()['rotation'],0)
+            arm.last_activity=time.monotonic()
             fake=Mock();fake.state.return_value=QtCore.QProcess.ProcessState.Running
             with patch.object(arm,'proc',fake):
                 arm.check_age();fake.kill.assert_not_called()
-                arm.received_frame=True;arm.check_age();fake.kill.assert_called_once()
+                arm.last_activity=time.monotonic()-31
+                arm.check_age();fake.kill.assert_called_once()
+                self.assertTrue(arm.restart_on_finish)
+                arm.restart_on_finish=False
         finally:arm.shutdown();agv.shutdown()
 
     def test_arm_vision_worker_prepares_api_before_opening_video(self):

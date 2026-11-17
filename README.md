@@ -122,9 +122,10 @@ V7 permitía 90° de apertura automática; el adaptador usa 75° para respetar l
 ### Control del brazo desde COCO
 
 - **A · Joint:** girar el encoder para seleccionar uno de los seis canales PCA9685; el eje vertical del joystick del brazo suma o resta grados al canal seleccionado. CH0–CH4 usan 0–180° y CH5 (pinza) 10–75°. El modo A no mueve el AGV.
-- **B · Gamepad:** los ejes del joystick mueven el objetivo en X/Y cartesianos y el IK CCD existente convierte el objetivo a ángulos. El encoder cambia Z o pinza, según su botón.
+- **B · Gamepad:** conserva el control legacy: el eje horizontal cambia el ángulo de base y el vertical acerca/aleja el objetivo radialmente; el IK CCD avanza en pasos limitados hacia el objetivo. El encoder cambia Z o pinza, según su botón.
 - **C · TCP:** queda temporalmente igual que B y reutiliza el IK CCD actual; no es aún un controlador TCP independiente.
-- Los tres modos requieren COCO como propietario, AGV listo, deadman y joystick centrado antes de habilitar movimiento. El botón global **Enviar pose del brazo** permanece visible entre pestañas; cambiar de pestaña principal sigue enviando STOP a los movimientos físicos en curso.
+- El OLED de COCO muestra la XYZ estimada actual del brazo y el estado de conducción; el detalle de AGV sigue en la pantalla Debug / AGV INFO. Son estimaciones PWM/FK, no mediciones con encoders articulares.
+- Los tres modos requieren COCO como propietario, AGV listo, deadman y joystick centrado antes de habilitar movimiento. La casilla global **Live Robot Arm movement** conserva el control continuo entre pestañas; al desactivarla deja de enviar poses. **Enviar pose (prueba)** en el panel Brazo manda una pose puntual y queda deshabilitada durante Live. Al cambiar de pestaña, el STOP global sigue actuando cuando Live está apagado.
 
 Bibliotecas Arduino: WiFi/Wire/Preferences incluidas en ESP32; Adafruit BNO055, Unified Sensor, GFX, SSD1306, PWM Servo Driver y sus dependencias. El constructor correcto es `Adafruit_PWMServoDriver pca(PCA_ADDR, Wire);`. Usar la placa/PSRAM/flash correspondientes a cada módulo. El firmware conserva la API ESP32 Arduino 3.x del proyecto original; no se compiló aquí con tu placa.
 
@@ -135,15 +136,15 @@ Bibliotecas Arduino: WiFi/Wire/Preferences incluidas en ESP32; Adafruit BNO055, 
 3. Si hay emergencia, liberar el paro físico y pulsar **Desbloquear E-STOP**. Esperar confirmación; esto no activa los relés.
 4. Seleccionar propietario **PC** o **COCO** y pulsar **POWER ON** cuando corresponda.
 5. En **AGV**, utilizar los controles existentes. Se conservan los ajustes reales del ZIP: rueda 120 mm, track 200 mm, 900 ticks/rev, escalas 0.6463144897, signos de encoder -1, IMU -1 e intercambio de encoders activado. Verificar físicamente esos valores en lugar de asumir que ya están calibrados para otra mecánica.
-6. Al cambiar de pestaña principal se envía STOP y se cancelan las tareas del brazo. Una pestaña no deja un movimiento anterior ejecutándose de forma oculta; el botón global de envío de pose sigue disponible.
-7. En **Brazo**, los sliders y trayectorias son simulados por defecto. **Enviar pose del brazo** manda una pose explícita. Las casillas de reproducción física requieren conexión, telemetría, PCA9685 y propiedad PC. Al habilitarlas, el preview se sincroniza con la estimación PWM del firmware antes de aceptar movimientos nuevos.
+6. Al cambiar de pestaña principal, se envía STOP salvo que **Live Robot Arm movement** esté activado; esa casilla mantiene el control del brazo activo hasta desactivarla o pulsar STOP. El control Live requiere conexión, telemetría, PCA9685 y propiedad PC.
+7. En **Brazo**, sliders y trayectorias son simulados por defecto. **Enviar pose (prueba)** manda la pose actual una sola vez y se deshabilita durante Live. Las casillas de reproducción física requieren conexión, telemetría, PCA9685 y propiedad PC.
 8. COCO sigue conectado por SAR, con sus modos y deadman existentes. La conexión USB/pendant propia de V7 no se expone para evitar dos controladores compitiendo por el brazo.
 9. **STOP** cancela rutas, colas de visión, recuperación y envío live; detiene motores e interpolación de servos. **E-STOP** además enclava el paro y apaga relés. Los PWM de servo reportados son estimaciones, no realimentación de encoders. Reset odometría cambia la referencia estimada; no hace homing.
 10. Una pérdida de enlace o rechazo del motor SAR cancela las fuentes físicas de V7. La reconexión no vuelve a marcar las casillas ni reanuda rutas. Cerrar la app detiene el robot y los procesos de cámara.
 
 ## Cámaras IP y ArUco
 
-Configurar cada URL, diccionario y lado exterior del marcador en milímetros. Los 35 mm iniciales son un valor editable: deben coincidir con el marcador impreso. Pulsar Conectar en cada panel y guardar la configuración.
+Configurar cada URL, diccionario, rotación del preview y lado exterior del marcador en milímetros. La rotación ofrece 0°, 90° horario, 90° antihorario y 180°; solo cambia la imagen mostrada, no los píxeles usados por ArUco ni la calibración. Los 35 mm iniciales son un valor editable: deben coincidir con el marcador impreso. Pulsar Conectar en cada panel y guardar la configuración. Si el stream se pierde, el worker reintenta con espera progresiva; Detener cancela esos reintentos.
 
 Sin calibración se muestran imagen e IDs; las columnas métricas quedan vacías. Para habilitarlas, elegir un `.npz` calibrado para **esa cámara, óptica y resolución/recorte** con:
 
@@ -151,7 +152,7 @@ Sin calibración se muestran imagen e IDs; las columnas métricas quedan vacías
 - `dist_coeffs`: coeficientes de distorsión OpenCV (4, 5, 8, 12 o 14).
 - `image_size`: `[ancho, alto]` de la calibración.
 
-Se escala la matriz si cambia proporcionalmente la resolución. Se rechazan relaciones de aspecto distintas; un recorte diferente requiere recalibración. La pose usa `solvePnP` con IPPE_SQUARE; se descartan poses con error de reproyección superior a 3 px. Esto no elimina toda la incertidumbre óptica ni la ambigüedad de un marcador plano.
+Se escala la matriz si cambia proporcionalmente la resolución. Se rechazan relaciones de aspecto distintas; un recorte diferente requiere recalibración. La pose usa `solvePnP` con IPPE_SQUARE; se descartan poses con error de reproyección superior a 3 px. El preview conserva proporción y no se amplía por encima de la resolución de la imagen. Esto no elimina toda la incertidumbre óptica ni la ambigüedad de un marcador plano.
 
 X cámara apunta a la derecha de la imagen, Y hacia abajo y Z hacia delante. Distancia es la norma del vector de traslación cámara–marcador. **No es la distancia desde la base del robot.** No se promedian las posiciones de ambas cámaras ni se mandan automáticamente como objetivos IK.
 

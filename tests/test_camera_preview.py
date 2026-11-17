@@ -5,12 +5,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import cv2
 import numpy as np
 from PySide6 import QtWidgets
 from app import Engine
 from arm_workspace import ArmWorkspace
+from camera_worker import rotate_preview, run as run_camera_worker
 from robotarm_v7 import VisionThread
 
 
@@ -18,6 +19,33 @@ APP=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 class CameraPreviewTests(unittest.TestCase):
+    def test_preview_rotation_supports_both_ninety_degree_directions(self):
+        frame=np.arange(6,dtype=np.uint8).reshape(2,3)
+
+        clockwise=rotate_preview(frame,90)
+        counterclockwise=rotate_preview(frame,-90)
+
+        np.testing.assert_array_equal(clockwise,np.array([[3,0],[4,1],[5,2]],dtype=np.uint8))
+        np.testing.assert_array_equal(counterclockwise,np.array([[2,5],[1,4],[0,3]],dtype=np.uint8))
+
+    def test_camera_worker_retries_a_lost_stream(self):
+        first=Mock()
+        first.isOpened.return_value=False
+        second=Mock()
+        second.isOpened.return_value=True
+        second.read.return_value=(False,None)
+        class StopRetry(Exception):pass
+        config={'url':'http://camera/stream','dictionary':'DICT_4X4_50','marker_mm':35}
+
+        with patch('camera_worker.cv2.VideoCapture',side_effect=[first,second]) as capture, \
+             patch('camera_worker.time.sleep',side_effect=[None,StopRetry]), \
+             patch('camera_worker.emit') as emit:
+            with self.assertRaises(StopRetry):
+                run_camera_worker(config)
+
+        self.assertEqual(capture.call_count,2)
+        self.assertTrue(any('Reintento' in call.args[0].get('status','') for call in emit.call_args_list))
+
     def arm(self):
         engine=Engine()
         with patch.object(ArmWorkspace,'_load_vision_config'):

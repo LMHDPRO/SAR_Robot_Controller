@@ -1,9 +1,10 @@
 [
   {
-    "url": "http://192.168.3.18:81/stream",
+    "url": "",
     "dictionary": "DICT_4X4_50",
     "marker_mm": 35.0,
     "calibration": "",
+    "rotation": -90,
     "arm_camera_api": false
   },
   {
@@ -11,6 +12,7 @@
     "dictionary": "DICT_4X4_50",
     "marker_mm": 35.0,
     "calibration": "",
+    "rotation": 0,
     "arm_camera_api": true
   }
 ]

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 import cv2
 import numpy as np
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 from app import Engine, Window
 from arm import ArmKinematics
 from arm_workspace import ArmWorkspace
@@ -77,9 +77,19 @@ class IntegrationTests(unittest.TestCase):
             w.workspaces.setCurrentIndex(1);APP.processEvents()
             self.assertFalse(w.plot.isVisible())
             self.assertTrue(w.arm_workspace.canvas.isVisible())
-            self.assertTrue(w.arm_send_button.isVisible() and w.arm_send_button.isEnabled())
+            self.assertTrue(w.arm_live_checkbox.isVisible())
+            self.assertTrue(w.arm_send_button.isVisible())
+            self.assertEqual(w.engine.urgent_commands.get_nowait()[0],'stop')
+            blocker=QtCore.QSignalBlocker(w.arm_live_checkbox)
+            w.arm_live_checkbox.setChecked(True)
+            w.arm_live_changed(True)
             w.workspaces.setCurrentIndex(2);APP.processEvents()
-            self.assertTrue(w.arm_send_button.isVisible() and w.arm_send_button.isEnabled())
+            self.assertTrue(w.arm_live_checkbox.isChecked())
+            self.assertTrue(w.arm_workspace.timer.isActive())
+            self.assertFalse(w.arm_send_button.isEnabled())
+            self.assertFalse(w.arm_send_button.isVisible())
+            self.assertTrue(w.engine.urgent_commands.empty())
+            del blocker
             self.assertTrue(w.ip.isVisible() and w.status.isVisible())
             self.assertLessEqual(w.height(),860)
             w.cameras.save=lambda:None

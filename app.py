@@ -63,6 +63,7 @@ class Engine(threading.Thread):
         self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper
         self.arm_target_rotation=self.arm_rotation
         self.arm_busy=False;self.arm_error='';self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
+        self.coco_arm_target_xyz=None;self.coco_arm_target_mode=None
         self.last_robot=self.last_pad=0;self.pad_data={};self.pad_base=None;self.pad_released=False;self.pad_authorized=False
         self.live=None;self.primitive=None;self.source='PC';self.last_ui=time.monotonic();self.path=deque(maxlen=10000)
         self.sent_pwm=(0,0)
@@ -134,6 +135,8 @@ class Engine(threading.Thread):
         self.routine.clear();self.live=None;self.primitive=None;self.pad_authorized=False;self.pad_released=False;self.stopped=True
         self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper
         self.arm_target_rotation=self.arm_rotation;self.arm_busy=False
+        self.coco_arm_at=None
+        self.coco_arm_target_xyz=None;self.coco_arm_target_mode=None
         if self.robot:
             try:
                 send=getattr(self.robot,'urgent',self.robot.send)
@@ -235,39 +238,71 @@ class Engine(threading.Thread):
         z_delta=0.0 if self.coco_arm_z is None else z_request-self.coco_arm_z
         grip_delta=0.0 if self.coco_arm_grip is None else grip_request-self.coco_arm_grip
         self.coco_arm_z=z_request;self.coco_arm_grip=grip_request
-        elapsed=0.0 if self.coco_arm_at is None else min(.1,max(0.0,now-self.coco_arm_at))
+        elapsed=0.0 if self.coco_arm_at is None else min(.05,max(0.0,now-self.coco_arm_at))
         self.coco_arm_at=now
         if max(abs(axes[0]),abs(axes[1]))<.01 and abs(z_delta)<.001 and abs(grip_delta)<.001:
             return
         target_angles=self.arm_target_angles.copy()
-        x,y,z=self.arm_model.compute_fk(target_angles)[0]
+        current_xyz=self.arm_model.compute_fk(target_angles)[0]
         gripper=self.arm_target_gripper
         arm_mode=p.get('arm_mode','XY')
         if arm_mode=='XY':
-            target_xyz=np.array([x+axes[0]*25.0*elapsed,y+axes[1]*25.0*elapsed,z])
+            if self.coco_arm_target_xyz is None or self.coco_arm_target_mode!=arm_mode:
+                self.coco_arm_target_xyz=current_xyz.copy()
+                self.coco_arm_target_mode=arm_mode
+            target_xyz=self.coco_arm_target_xyz.copy()
+            if max(abs(axes[0]),abs(axes[1]))>=.01:
+                x,y,z=target_xyz
+                radius=max(70.0,math.hypot(x,y)+axes[1]*100.0*elapsed)
+                theta=math.atan2(y,x)-axes[0]*0.4*elapsed
+                target_xyz[:2]=[radius*math.cos(theta),radius*math.sin(theta)]
+            target_xyz[2]+=z_delta
+            self.coco_arm_target_xyz=target_xyz.copy()
         elif arm_mode=='RX_RY':
             target_angles[3]=max(0.0,min(180.0,target_angles[3]-axes[1]*30.0*elapsed))
             gripper=max(10.0,min(75.0,gripper-axes[0]*30.0*elapsed))
             target_xyz=self.arm_model.compute_fk(target_angles)[0]
+            target_xyz[2]+=z_delta
+            self.coco_arm_target_mode=arm_mode
         else:
             self.arm_error='Unknown COCO arm mode'
             return
         encoder_mode=p.get('encoder_mode','Z')
         if encoder_mode=='Z':
-            target_xyz[2]=max(0.0,min(self.arm_model.max_reach,target_xyz[2]+z_delta))
+            target_xyz[2]=max(0.0,min(self.arm_model.max_reach,float(target_xyz[2])))
         elif encoder_mode=='GRIP':
             gripper=max(10.0,min(75.0,gripper+grip_delta*.65))
         else:
             self.arm_error='Unknown COCO arm encoder mode'
             return
-        target_xyz=self.arm_model.enforce_safety_zone(target_xyz)
-        needs_ik=(arm_mode=='XY' and (max(abs(axes[0]),abs(axes[1]))>=.01 or abs(z_delta)>=.001)
-                  or arm_mode=='RX_RY' and abs(z_delta)>=.001)
+        target_xyz[0]=max(-self.arm_model.max_reach,min(self.arm_model.max_reach,float(target_xyz[0])))
+        target_xyz[1]=max(0.0,min(self.arm_model.max_reach,float(target_xyz[1])))
+        target_xyz[2]=max(0.0,min(self.arm_model.max_reach,float(target_xyz[2])))
+        radius=math.hypot(target_xyz[0],target_xyz[1])
+        if radius<70.0:
+            target_xyz[:2]=[70.0,0.0] if radius<0.1 else target_xyz[:2]*(70.0/radius)
+        needs_ik=(arm_mode=='XY' and (
+            max(abs(axes[0]),abs(axes[1]))>=.01 or abs(z_delta)>=.001)
+            or arm_mode=='RX_RY' and abs(z_delta)>=.001)
         if needs_ik:
             if arm_mode=='RX_RY':self.arm_model.last_ik_theta=self.arm_model.convert_angles(target_angles)
-            success,angles,detail=self.arm_model.compute_ik(target_xyz)
+            distance=float(np.linalg.norm(target_xyz-current_xyz))
+            if distance>15.0:
+                target_xyz=current_xyz+(target_xyz-current_xyz)*(15.0/distance)
+                if arm_mode=='XY':self.coco_arm_target_xyz=target_xyz.copy()
+            distance=float(np.linalg.norm(target_xyz-current_xyz))
+            max_step=100.0*elapsed
+            if distance>0.5:
+                next_xyz=current_xyz+(target_xyz-current_xyz)*(min(distance,max_step)/distance)
+            else:
+                next_xyz=current_xyz.copy()
+            if distance>0.5 and max_step>0:
+                success,angles,detail=self.arm_model.compute_ik(next_xyz)
+            else:
+                success,angles,detail=True,target_angles,0.0
             if not success:
                 self.arm_error=f'COCO arm target rejected: {detail}'
+                self.coco_arm_target_xyz=current_xyz.copy()
                 return
         else:
             angles=target_angles
@@ -649,7 +684,9 @@ class Engine(threading.Thread):
                     except OSError:self.halt(False);self.robot.close();self.robot=None
                 if self.pad and now-last_state>=0.1:
                     fresh=bool(self.robot and now-self.last_robot<=0.5);last_state=now
-                    try:self.pad.send(f"CTRL:{int(self.source=='COCO')}\nSTATE:0,0,0,0,0,0,{self.odom.v:.2f},{int(fresh)},{int(fresh and self.telemetry.get('armed',0))},0\nAGV:{(self.odom.left+self.odom.right)/20:.2f},{math.degrees(self.odom.yaw):.2f},{self.odom.v:.2f},{self.telemetry.get('tl',0)},{self.telemetry.get('tr',0)},{int(self.telemetry.get('imu',0))}\nYAW:{self.odom.imu_yaw:.2f},{self.turn_delta:.2f},{self.odom.imu_yaw/360:.4f},{int(fresh and self.odom.imu_valid)}\n")
+                    try:
+                        arm_xyz=self.arm_model.compute_fk(self.arm_angles)[0]
+                        self.pad.send(f"CTRL:{int(self.source=='COCO')}\nSTATE:{arm_xyz[0]:.1f},{arm_xyz[1]:.1f},{arm_xyz[2]:.1f},0,0,0,{self.odom.v:.2f},{int(fresh)},{int(fresh and self.telemetry.get('armed',0))},0\nAGV:{(self.odom.left+self.odom.right)/20:.2f},{math.degrees(self.odom.yaw):.2f},{self.odom.v:.2f},{self.telemetry.get('tl',0)},{self.telemetry.get('tr',0)},{int(self.telemetry.get('imu',0))}\nYAW:{self.odom.imu_yaw:.2f},{self.turn_delta:.2f},{self.odom.imu_yaw/360:.4f},{int(fresh and self.odom.imu_valid)}\n")
                     except OSError:
                         if self.source=='COCO':self.halt_loss()
                         self.pad.close();self.pad=None
@@ -710,6 +747,8 @@ class Window(QtWidgets.QMainWindow):
         QScrollArea{border:0;} QLabel{background:transparent;}''')
         self.engine=Engine();self.engine.signals.state.connect(self.render);self.engine.signals.message.connect(self.message)
         self.last_report=None;self.last_geometry=None;self.holding=False;self.routine_steps=[]
+        self.arm_preview_send_button=QtWidgets.QPushButton()
+        self.arm_preview_send_button.hide()
         self.arm_model=ArmKinematics();self.arm_preview_angles=self.arm_model.startup_angles.copy();self.arm_preview_gripper=75.0;self.arm_inputs_syncing=False;self.arm_preview_valid=True
         central=QtWidgets.QWidget();self.setCentralWidget(central);outer=QtWidgets.QVBoxLayout(central)
         top=QtWidgets.QHBoxLayout();outer.addLayout(top)
@@ -723,12 +762,11 @@ class Window(QtWidgets.QMainWindow):
         b=self.button(top,'POWER OFF',lambda:self.global_stop('stop',True));b.setStyleSheet('background:#713542')
         b=self.button(top,'STOP',self.stop);b.setStyleSheet('background:#b95823;font-weight:bold;padding:12px')
         safety=QtWidgets.QHBoxLayout();outer.addLayout(safety)
+        self.arm_live_layout=QtWidgets.QHBoxLayout();outer.addLayout(self.arm_live_layout)
         emergency=self.button(safety,'E-STOP',lambda:self.global_stop('estop'))
         emergency.setStyleSheet('background:#c6283c;color:white;font-size:18px;font-weight:bold;padding:12px;')
         self.button(safety,'Desbloquear E-STOP',lambda:self.global_stop('estop_reset'))
         self.button(safety,'Dar control a COCO',lambda:self.source.setCurrentText('COCO'))
-        self.arm_send_button=self.button(safety,'Enviar pose del brazo',self.send_arm_pose)
-        self.arm_send_button.setToolTip('Envía al AGV la pose válida del panel Brazo · V7.')
         self.button(safety,'Recuperar control PC',lambda:self.source.setCurrentText('PC'))
         self.cut_loss=QtWidgets.QCheckBox('Apagar relays al perder comunicación')
         self.cut_loss.setChecked(bool(self.engine.runtime['cut_relays_on_loss']))
@@ -823,6 +861,17 @@ class Window(QtWidgets.QMainWindow):
         self.tabs.removeTab(3)
         self.arm_workspace=ArmWorkspace(self.engine)
         self.workspaces.addTab(self.arm_workspace.takeCentralWidget(),'Brazo · V7')
+        source_layout=self.arm_workspace.chk_live.parentWidget().layout()
+        source_layout.removeWidget(self.arm_workspace.chk_live)
+        self.arm_workspace.chk_live.setText('Live Robot Arm movement')
+        self.arm_workspace.chk_live.setParent(central)
+        self.arm_live_layout.addWidget(self.arm_workspace.chk_live)
+        self.arm_live_layout.addStretch()
+        self.arm_live_checkbox=self.arm_workspace.chk_live
+        self.arm_live_checkbox.toggled.connect(self.arm_live_changed)
+        self.arm_send_button=self.arm_workspace.btn_send_manual
+        self.arm_send_button.setText('Enviar pose (prueba)')
+        self.arm_send_button.setToolTip('Envía una pose puntual desde el panel Brazo; no es el control Live.')
         self.cameras=CamerasPage()
         camera_scroll=QtWidgets.QScrollArea();camera_scroll.setWidgetResizable(True);camera_scroll.setWidget(self.cameras)
         self.workspaces.addTab(camera_scroll,'Cámaras IP · ArUco')
@@ -848,7 +897,20 @@ class Window(QtWidgets.QMainWindow):
         self.engine.post('stop',False)
         if kind!='stop' or value:self.engine.post(kind,value)
     def stop(self):self.global_stop()
+    def arm_live_changed(self,_enabled):
+        if not hasattr(self,'arm_workspace'):return
+        if self.arm_live_checkbox.isChecked():
+            self.arm_workspace.timer.start(50)
+        elif self.workspaces.currentIndex()!=1:
+            self.arm_workspace.timer.stop()
+        if hasattr(self,'arm_send_button'):
+            self.arm_send_button.setEnabled(
+                self.arm_preview_valid and self.source.currentText()=='PC' and not self.arm_live_checkbox.isChecked()
+            )
     def workspace_changed(self,index):
+        if self.arm_live_checkbox.isChecked():
+            self.arm_workspace.timer.start(50)
+            return
         self.global_stop()
         if index==1:self.arm_workspace.timer.start(50)
         else:self.arm_workspace.timer.stop()
@@ -949,7 +1011,7 @@ class Window(QtWidgets.QMainWindow):
         self.arm_preview_gripper=float(self.arm_gripper_slider.value())
         self.arm_gripper_label.setText(f'Ángulo de referencia: {self.arm_preview_gripper:.0f}°')
         self.arm_preview.set_pose(self.arm_model,self.arm_preview_angles,self.arm_preview_gripper)
-        self.arm_send_button.setEnabled(self.arm_preview_valid and self.source.currentText()=='PC')
+        self.arm_preview_send_button.setEnabled(self.arm_preview_valid and self.source.currentText()=='PC')
     def send_arm_pose(self):
         if self.source.currentText()!='PC':
             self.message('Selecciona PC como propietario para enviar la pose desde la app.')
@@ -1039,7 +1101,10 @@ class Window(QtWidgets.QMainWindow):
                 self.arm_gripper_slider.setValue(int(round(self.arm_preview_gripper)))
                 self.arm_inputs_syncing=False
                 self.update_arm_preview()
-        self.arm_send_button.setEnabled(self.arm_preview_valid and self.source.currentText()=='PC')
+        self.arm_preview_send_button.setEnabled(self.arm_preview_valid and self.source.currentText()=='PC')
+        self.arm_send_button.setEnabled(
+            self.arm_preview_valid and self.source.currentText()=='PC' and not self.arm_live_checkbox.isChecked()
+        )
         if self.last_geometry!=g:
             self.last_geometry=dict(g)
             for k,v in g.items():self.fields[k].setText(str(v))
