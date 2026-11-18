@@ -44,7 +44,7 @@ def detect(frame,detector,marker_mm,calibration):
                     error=float(np.sqrt(np.mean(np.sum((projected.reshape(4,2)-c.reshape(4,2))**2,axis=1))))
                     row['reprojection_px']=error
                     if error<=3.0:
-                        row.update(xyz_camera_mm=t.reshape(3).tolist(),distance_mm=float(np.linalg.norm(t)))
+                        row.update(xyz_camera_mm=t.reshape(3).tolist(),distance_mm=float(np.linalg.norm(t)),rvec=r.reshape(3).tolist())
                         cv2.drawFrameAxes(frame,k,d,r,t,marker_mm*.5)
                     else:row['error']='Pose descartada: reproyección >3 px'
         rows.append(row)
@@ -71,7 +71,10 @@ def run(config):
     rotation=int(config.get('rotation',0))
     if rotation not in (0,90,-90,180):raise ValueError('Rotación inválida: use 0, 90, -90 o 180 grados')
     dictionary=cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco,config['dictionary']))
-    detector=cv2.aruco.ArucoDetector(dictionary,cv2.aruco.DetectorParameters())
+    parameters=cv2.aruco.DetectorParameters()
+    parameters.minMarkerPerimeterRate=0.015
+    parameters.cornerRefinementMethod=cv2.aruco.CORNER_REFINE_SUBPIX
+    detector=cv2.aruco.ArucoDetector(dictionary,parameters)
     source=config['url'].strip()
     if not config.get('arm_camera_api') and not source.startswith(('http://','https://','rtsp://')):
         raise ValueError('Introducir URL http(s) o rtsp de la cámara ESP32')
@@ -91,6 +94,9 @@ def run(config):
                 start=time.monotonic()
                 ok,frame=cap.read()
                 if not ok:raise RuntimeError('Se perdió el stream de cámara')
+                # This is the local read time, not the camera exposure time;
+                # ESP32/network/FFmpeg buffering latency is unknown here.
+                captured_at=time.monotonic()
                 rows=detect(frame,detector,marker_mm,calibration)
                 preview=rotate_preview(frame,rotation)
                 h,w=preview.shape[:2]
@@ -99,7 +105,7 @@ def run(config):
                     preview=cv2.resize(preview,(max(1,round(w*scale)),max(1,round(h*scale))),interpolation=cv2.INTER_AREA)
                 ok,jpeg=cv2.imencode('.jpg',preview,[cv2.IMWRITE_JPEG_QUALITY,75])
                 if ok:
-                    emit({'jpeg':base64.b64encode(jpeg).decode(),'detections':rows,'metric':calibration is not None})
+                    emit({'jpeg':base64.b64encode(jpeg).decode(),'detections':rows,'metric':calibration is not None,'captured_at':captured_at,'image_size':[frame.shape[1],frame.shape[0]]})
                     attempt=0
                 time.sleep(max(0,.1-(time.monotonic()-start)))
         except (OSError,RuntimeError,cv2.error) as exc:

@@ -12,6 +12,7 @@ from PySide6 import QtWidgets
 from app import Engine
 from arm_workspace import ArmWorkspace
 from camera_worker import rotate_preview, run as run_camera_worker
+from cameras import CameraPanel
 from robotarm_v7 import VisionThread
 
 
@@ -19,6 +20,35 @@ APP=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 class CameraPreviewTests(unittest.TestCase):
+    def test_reference_size_change_rescales_without_accepting_other_changes(self):
+        saved={'url':'camera','dictionary':'DICT_6X6_250','marker_mm':35.,'calibration_sha256':'abc'}
+        ref={'identity':saved,'xyz_camera_mm':[35.,70.,175.]}
+        current=dict(saved,marker_mm=30.)
+        result,changed=CameraPanel.adapt_reference_size(ref,current)
+        self.assertTrue(changed)
+        np.testing.assert_allclose(result['xyz_camera_mm'],[30.,60.,150.])
+        self.assertEqual(ref['identity']['marker_mm'],35.)
+        with self.assertRaisesRegex(ValueError,'calibración'):
+            CameraPanel.adapt_reference_size(ref,dict(current,calibration_sha256='different'))
+
+    def test_reference_reports_measured_distance_and_saves_in_range(self):
+        panel=CameraPanel('AGV',{})
+        self.addCleanup(panel.shutdown)
+        self.addCleanup(panel.deleteLater)
+        with tempfile.TemporaryDirectory() as folder:
+            panel.reference_path=Path(folder)/'reference.json'
+            now=time.monotonic()
+            panel.marker_readings=[{'captured_at':now,'xyz_camera_mm':[0,0,300],
+                                    'rvec':[0,0,0],'image_size':[640,480]} for _ in range(5)]
+            with patch.object(panel,'reference_identity',return_value={'camera':'test'}):
+                panel.save_reference()
+                self.assertIn('300 mm',panel.alignment_status.text())
+                self.assertIn('Acerca',panel.alignment_status.text())
+                self.assertFalse(panel.reference_path.exists())
+                for sample in panel.marker_readings:sample['xyz_camera_mm']=[0,0,200]
+                panel.save_reference()
+                self.assertTrue(panel.reference_path.exists())
+
     def test_preview_rotation_supports_both_ninety_degree_directions(self):
         frame=np.arange(6,dtype=np.uint8).reshape(2,3)
 

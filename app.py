@@ -10,6 +10,8 @@ from lidar_workspace import LidarWorkspace
 from arm import ArmKinematics
 from defaults import RUNTIME_DEFAULTS, GEOMETRY_DEFAULTS
 from core import Wait, distance_scale, Geometry, Odometry, Primitive, SingleEncoderMove, ImuTurn, WheelCapture, wheel_correction, validate_routine
+from aruco_alignment import ArucoAlignment
+from pickup_sequence import PickupSequence
 
 class Link:
     def __init__(self,host,port):
@@ -62,11 +64,12 @@ class Engine(threading.Thread):
         self.arm_model=ArmKinematics();self.arm_angles=self.arm_model.startup_angles.copy();self.arm_gripper=75.0;self.arm_rotation=90.0
         self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper
         self.arm_target_rotation=self.arm_rotation
-        self.arm_busy=False;self.arm_error='';self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
+        self.arm_busy=False;self.arm_error='';self.arm_approach=None;self.collection_sequence=None;self.pickup_sequence=None;self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
         self.coco_arm_target_xyz=None;self.coco_arm_target_mode=None
         self.last_robot=self.last_pad=0;self.pad_data={};self.pad_base=None;self.pad_released=False;self.pad_authorized=False
         self.live=None;self.primitive=None;self.source='PC';self.last_ui=time.monotonic();self.path=deque(maxlen=10000)
         self.sent_pwm=(0,0)
+        self.aruco_alignment=None;self.aruco_sample=None;self.aruco_status=''
         self.estop_latched=False;self.reset_pending=False;self.epoch=0;self.urgent_commands=queue.Queue()
         self.pool=ThreadPoolExecutor(max_workers=2);self.pending_links={};self.link_generation={'robot':0,'pad':0}
         self.runtime=dict(RUNTIME_DEFAULTS)
@@ -130,9 +133,12 @@ class Engine(threading.Thread):
         if self.capture:return 'Wheel capture still active: press STOP and wait for its result'
         return ''
     def halt(self,disarm=False):
+        self.arm_approach=None
+        self.collection_sequence=None
+        self.pickup_sequence=None
         self.signals.cancelled.emit()
         if self.capture:self.capture.stop('Stopped: partial capture retained',time.monotonic())
-        self.routine.clear();self.live=None;self.primitive=None;self.pad_authorized=False;self.pad_released=False;self.stopped=True
+        self.routine.clear();self.live=None;self.primitive=None;self.aruco_alignment=None;self.pad_authorized=False;self.pad_released=False;self.stopped=True
         self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper
         self.arm_target_rotation=self.arm_rotation;self.arm_busy=False
         self.coco_arm_at=None
@@ -156,7 +162,7 @@ class Engine(threading.Thread):
     def send_arm_pose(self,angles,gripper,duration_ms,owner,rotation=None):
         reason=self.arm_motion_block(owner)
         if reason:raise ValueError(reason)
-        if owner=='PC' and (self.live or self.primitive or self.routine or self.capture):
+        if owner=='PC' and (self.live or self.primitive or self.routine or self.capture or self.aruco_alignment):
             raise ValueError('STOP drivetrain motion before moving the arm from PC')
         target=np.asarray(angles,dtype=float)
         if target.shape!=(4,) or not np.all(np.isfinite(target)) or np.any(target<0) or np.any(target>180):
@@ -314,13 +320,84 @@ class Engine(threading.Thread):
         except ValueError as exc:
             self.arm_error=str(exc)
     def handle_arm_pose(self,value):
+        if self.arm_approach is not None:raise ValueError('STOP antes de enviar otra pose durante la secuencia')
         angles,gripper,duration=value
         self.send_arm_pose(angles,gripper,duration,'PC')
+    def start_arm_approach(self):
+        if self.arm_approach is not None:raise ValueError('La secuencia del brazo ya está activa')
+        self.signals.cancelled.emit()
+        self.send_arm_pose([90,126,74,106],75,3000,'PC',90)
+        self.arm_approach={'started':time.monotonic(),'seen_busy':False}
+    def update_arm_approach(self,channels,busy,now):
+        sequence=self.arm_approach
+        if sequence is None:return
+        if busy:sequence['seen_busy']=True
+        if (sequence['seen_busy'] and not busy and now-sequence['started']>=3.0
+                and all(abs(float(a)-b)<=1 for a,b in zip(channels,[90,126,74,90,106,75]))):
+            self.arm_approach=None
+            self.send_arm_pose([108.5,149.4,180,6.8],75,3000,'PC',90)
+            if self.collection_sequence is not None:
+                self.collection_sequence.update(stage='second',started=now,seen_busy=False)
+            self.emit('Segunda etapa de aproximación enviada')
+    def update_collection_sequence(self,channels,busy,now):
+        sequence=self.collection_sequence
+        if sequence is None or sequence['stage']!='second':return
+        if busy:sequence['seen_busy']=True
+        if (sequence['seen_busy'] and not busy and now-sequence['started']>=3
+                and all(abs(float(a)-b)<=1 for a,b in zip(channels,[108,149,180,90,7,75]))):
+            reason=self.motion_block()
+            if reason:raise ValueError(reason)
+            ref=sequence['reference'];self.collection_sequence=None
+            self.aruco_sample=None
+            self.aruco_alignment=ArucoAlignment(ref,now,self.min_pwm,require_orientation=True,require_new_sample=True);self.stopped=False
+            self.emit('Brazo preparado; esperando lectura del ArUco para aproximar el AGV')
+    def send_pickup_step(self,step):
+        name,joints,gripper=step
+        self.send_arm_pose(joints,gripper,3000,'PC',90)
+        action='Entrega' if self.pickup_sequence and self.pickup_sequence.release else 'Recolección'
+        self.emit(f'{action}: {name}; STOP cancela')
+    def start_pickup(self,release=False):
+        reason=self.arm_motion_block('PC')
+        if reason:raise ValueError(reason)
+        if self.arm_busy or self.live or self.primitive or self.routine or self.capture or self.aruco_alignment or self.collection_sequence or self.arm_approach or self.pickup_sequence:
+            raise ValueError('Detén el movimiento actual antes de recolectar')
+        if release:
+            channels=self.telemetry.get('arm_angles')
+            if not isinstance(channels,list) or len(channels)!=6 or not all(isinstance(a,(float,int)) and math.isfinite(a) and abs(a-b)<=1 for a,b in zip(channels,[108,149,180,90,7,10])):
+                raise ValueError('Para dejar la pieza, primero coloca el brazo en la posición segura con la pinza a 10°')
+        self.signals.cancelled.emit()
+        now=time.monotonic()
+        self.pickup_sequence=PickupSequence([108.5,149.4,180,6.8],now,release=release)
+        self.send_pickup_step(self.pickup_sequence.next_step(now))
     def halt_loss(self):
         self.distance_reference=None
         self.halt(bool(self.runtime['cut_relays_on_loss']))
     def handle(self,k,v):
         if k=='heartbeat':self.last_ui=time.monotonic();return
+        if k=='aruco_sample':self.aruco_sample=v;return
+        if k=='pickup_start':
+            self.start_pickup();return
+        if k=='release_start':
+            self.start_pickup(release=True);return
+        if k=='aruco_sequence':
+            reason=self.motion_block()
+            if reason:raise ValueError(reason)
+            if self.live or self.primitive or self.routine or self.capture or self.aruco_alignment or self.collection_sequence or self.arm_approach or self.pickup_sequence:
+                raise ValueError('Detén el movimiento actual')
+            self.start_arm_approach()
+            self.collection_sequence={'stage':'first','reference':v,'started':time.monotonic()}
+            self.emit('Secuencia ArUco: preparando brazo; STOP cancela')
+            return
+        if k=='aruco_start':
+            reason=self.motion_block()
+            if reason:raise ValueError(reason)
+            if self.live or self.primitive or self.routine or self.capture or self.aruco_alignment or self.collection_sequence or self.pickup_sequence or self.arm_approach:raise ValueError('Detén el movimiento actual')
+            now=time.monotonic()
+            self.aruco_alignment=ArucoAlignment(v,now,self.min_pwm,require_orientation=True);self.stopped=False
+            self.emit('Alineación ArUco iniciada; esperando marcador válido. STOP cancela')
+            return
+        if (self.aruco_alignment or self.collection_sequence or self.pickup_sequence) and k not in ('stop','estop'):
+            raise ValueError('STOP antes de iniciar otro movimiento o cambiar configuración')
         if k=='arm_camera_url':self.runtime['arm_camera_url']=str(v);self.save_runtime()
         elif k=='connect_robot':self.request_link('robot',v)
         elif k=='connect_pad':self.request_link('pad',v)
@@ -386,6 +463,7 @@ class Engine(threading.Thread):
             self.halt();self.source=v;self.pad_base=None
             self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
         elif k=='arm_pose':self.handle_arm_pose(v)
+        elif k=='arm_approach':self.start_arm_approach()
         elif k=='power':
             if v and (self.estop_latched or self.telemetry.get('estop')==1):raise ValueError('Desbloquear E-STOP primero')
             if v and self.telemetry.get('protocol')!=1:raise ValueError('Cargar firmware SAR v1.0')
@@ -597,6 +675,8 @@ class Engine(threading.Thread):
                                 self.arm_rotation=float(arm_channels[3])
                                 self.arm_gripper=float(arm_channels[5])
                                 self.arm_busy=bool(t.get('arm_busy',0))
+                                self.update_arm_approach(arm_channels,self.arm_busy,time.monotonic())
+                                self.update_collection_sequence(arm_channels,self.arm_busy,time.monotonic())
                                 if not self.arm_busy:
                                     self.arm_target_angles=self.arm_angles.copy()
                                     self.arm_target_gripper=self.arm_gripper
@@ -633,6 +713,23 @@ class Engine(threading.Thread):
                     self.pad.close();self.pad=None;self.pad_data={};self.last_pad=0
                     self.emit('COCO RX silent >3 s: reconnecting, release DM')
                 l=r=0
+                if self.aruco_alignment:
+                    try:
+                        reason=self.motion_block()
+                        if reason:raise RuntimeError(reason)
+                        if not self.odom.imu_valid:
+                            l,r=0,0;status='Esperando IMU válida; AGV detenido'
+                        else:
+                            l,r=self.aruco_alignment.output(self.aruco_sample,now,self.odom)
+                            sample=self.aruco_alignment.last_valid_sample
+                            status=('Buscando ArUco; AGV detenido' if not sample or now-sample['captured_at']>.5
+                                    else 'Avanzando o girando' if l or r else 'Verificando posición; AGV detenido')
+                        if status!=self.aruco_status:
+                            self.aruco_status=status;self.emit(status)
+                        if self.aruco_alignment.done:
+                            message=self.aruco_alignment.message;self.halt();self.test_result=message;self.emit(message)
+                    except (RuntimeError,ValueError,KeyError,TypeError) as e:
+                        self.halt();self.test_result='Alineación detenida: '+str(e);self.emit(self.test_result);l=r=0
                 if self.robot and self.telemetry.get('armed') and now-self.last_robot<=0.5 and now-self.last_ui<=.6 and not self.estop_latched and self.telemetry.get('protocol')==1:
                     if self.routine and not self.primitive and not self.live and now>=self.next_step_at:
                         kind,value=self.routine.popleft();self.start_test(kind,value,self.routine_cap);self.routine_step+=1
@@ -671,6 +768,27 @@ class Engine(threading.Thread):
                     if self.capture.done:
                         self.test_result=f"{self.capture.side.upper()}: {self.capture.signed_ticks:+d} raw ticks. {self.capture.reason}. Enter actual turns and Apply."
                         self.emit(self.test_result);self.capture=None;l=r=0
+                if self.arm_approach is not None and now-self.arm_approach['started']>5:
+                    self.halt();self.emit('Secuencia cancelada: primera etapa sin confirmación de telemetría')
+                if self.collection_sequence is not None and now-self.collection_sequence['started']>5:
+                    self.halt();self.emit('Secuencia cancelada: brazo sin confirmación de telemetría')
+                if self.pickup_sequence is not None:
+                    try:
+                        reason=self.arm_motion_block('PC')
+                        if reason:raise RuntimeError(reason)
+                        channels=self.telemetry.get('arm_angles')
+                        if not isinstance(channels,list) or len(channels)!=6 or not all(isinstance(v,(int,float)) and math.isfinite(v) for v in channels):
+                            raise RuntimeError('Telemetría del brazo no válida')
+                        was_waiting=self.pickup_sequence.wait_until is not None
+                        step=self.pickup_sequence.observe(channels,bool(self.telemetry.get('arm_busy',0)),now)
+                        if not was_waiting and self.pickup_sequence.wait_until is not None:
+                            self.emit('Pinza: esperando estabilización de la etapa; STOP cancela')
+                        if step:self.send_pickup_step(step)
+                        elif self.pickup_sequence.done:
+                            released=self.pickup_sequence.release;self.pickup_sequence=None
+                            self.emit(('LISTO PARA OPERAR: secuencia para dejar la pieza finalizada. ' if released else 'LISTO PARA OPERAR: recolección finalizada, pinza cerrada. ')+'Verifica la posición física del brazo antes de retomar el control.')
+                    except (RuntimeError,ValueError,TypeError) as exc:
+                        self.halt();self.emit('Recolección detenida: '+str(exc))
                 if self.robot and now-last_output>=0.05:
                     turning=(l*r<0 and abs(l)>0 and abs(r)>0)
                     if turning and not self.was_turning:self.turn_origin=self.odom.imu_yaw
@@ -873,6 +991,15 @@ class Window(QtWidgets.QMainWindow):
         self.arm_send_button.setText('Enviar pose (prueba)')
         self.arm_send_button.setToolTip('Envía una pose puntual desde el panel Brazo; no es el control Live.')
         self.cameras=CamerasPage()
+        self.cameras.panels[0].marker_sample.connect(lambda sample:self.engine.post('aruco_sample',sample))
+        self.cameras.panels[0].sequence_requested.connect(lambda ref:self.engine.post('aruco_sequence',ref))
+        self.cameras.panels[0].alignment_requested.connect(lambda ref:self.engine.post('aruco_start',ref))
+        self.cameras.panels[0].pickup_requested.connect(lambda:self.engine.post('pickup_start'))
+        self.cameras.panels[0].release_requested.connect(lambda:self.engine.post('release_start'))
+        self.engine.signals.message.connect(lambda message:self.cameras.panels[0].alignment_status.setText('STATUS: '+message))
+        self.cameras.panels[0].alignment_stop.connect(self.global_stop)
+        self.cameras.panels[0].approach_pose_requested.connect(
+            lambda:self.engine.post('arm_approach'))
         camera_scroll=QtWidgets.QScrollArea();camera_scroll.setWidgetResizable(True);camera_scroll.setWidget(self.cameras)
         self.workspaces.addTab(camera_scroll,'Cámaras IP · ArUco')
         self.lidar_workspace=LidarWorkspace()

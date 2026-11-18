@@ -42,6 +42,21 @@ class ArmControlTests(unittest.TestCase):
             ["ARM:90,126,74,90,106,65,2000\n"],
         )
 
+    def test_approach_waits_for_first_stage_and_stop_cancels_it(self):
+        engine = self.ready_engine()
+        engine.handle('arm_approach', None)
+        start = engine.arm_approach['started']
+        self.assertEqual(engine.robot.messages, ['ARM:90,126,74,90,106,75,3000\n'])
+        engine.update_arm_approach([90,126,74,90,106,75], False, start + 3.1)
+        self.assertEqual(len(engine.robot.messages), 1)
+        engine.update_arm_approach([90,126,74,90,106,75], True, start + 1)
+        engine.update_arm_approach([90,126,74,90,106,75], False, start + 3.1)
+        self.assertEqual(engine.robot.messages[-1], 'ARM:108,149,180,90,7,75,3000\n')
+        engine.handle('arm_approach', None)
+        engine.handle('stop', False)
+        engine.update_arm_approach([90,126,74,90,106,75], False, start + 4)
+        self.assertEqual(engine.robot.messages[-1], 'STOP\n')
+
     def test_pc_pose_is_rejected_when_pca9685_is_not_ready(self):
         engine = self.ready_engine()
         engine.telemetry["pca_ready"] = 0

@@ -1,9 +1,9 @@
 [
   {
-    "url": "",
-    "dictionary": "DICT_4X4_50",
-    "marker_mm": 35.0,
-    "calibration": "",
+    "url": "http://192.168.3.6:81/stream",
+    "dictionary": "DICT_6X6_250",
+    "marker_mm": 30.0,
+    "calibration": "c:\\Users\\ytedu\\OneDrive\\Documents\\Developer\\Culebron 5 Especial\\SAR_Robot_Controller_v1_6\\camera_agv_calibration.npz",
     "rotation": -90,
     "arm_camera_api": false
   },

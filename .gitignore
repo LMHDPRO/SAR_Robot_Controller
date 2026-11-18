@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 capturas_lidar/
 lidar_settings.json
+aruco_agv_reference.json
