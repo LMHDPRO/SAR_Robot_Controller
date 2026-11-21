@@ -9,6 +9,14 @@ _runtime_patch=patch.object(Engine,'save_runtime');_runtime_patch.start()
 def frame(ms=0,l=0,r=0,heading=0,**kw):
  t=dict(protocol=1,boot_id=1,seq=ms+1,ms=ms,tl=l,tr=r,pl=0,pr=0,armed=0,imu=1,heading=heading,imu_age_ms=0,imu_read_ok=1,cg=3,cs=3,ca=3,cm=3);t.update(kw);return t
 class DifferentialTests(unittest.TestCase):
+ def test_raw_tick_target_stops_and_retains_coasting(self):
+  from core import WheelCapture
+  capture=WheelCapture('left',1,frame(l=100),Geometry(tpr_l=1000),0,80,target_ticks=20)
+  self.assertEqual(capture.output(frame(l=81),.2),(80,0))
+  self.assertEqual(capture.output(frame(l=80),.3),(0,0))
+  self.assertEqual(capture.output(frame(l=77),.8),(0,0))
+  self.assertTrue(capture.done)
+  self.assertEqual(capture.report()['ticks'],-23)
  def setUp(self):self.g=Geometry(diameter=100/math.pi,track=100,tpr_l=100,tpr_r=100,imu_sign=1);self.o=Odometry();self.o.update(frame(),self.g)
  def test_straight_uses_both_encoders_and_imu_heading(self):
   self.o.update(frame(100,10,14),self.g);self.assertAlmostEqual(self.o.x,12);self.assertAlmostEqual(self.o.y,0);self.assertGreater(self.o.enc_yaw,0);self.assertEqual(self.o.source,'IMU')
@@ -47,6 +55,11 @@ class DifferentialTests(unittest.TestCase):
   self.assertIn('341.200',e.test_result);self.assertEqual(e.g.tpr_l,341.2)
 
 class PreciseImuTests(unittest.TestCase):
+ def test_one_degree_is_outside_precise_window(self):
+  o,p=self.make_turn(90)
+  o.imu_yaw=89
+  for tick in range(20):p.output(o,tick*.05)
+  self.assertFalse(p.done)
  def make_turn(self,value=180):
   o=Odometry();o.imu_valid=True
   return o,ImuTurn(value,o,Geometry(),0,precise=True)
@@ -78,7 +91,7 @@ class PreciseImuTests(unittest.TestCase):
   self.assertFalse(p.done);self.assertGreater(l,0);self.assertLess(r,0)
  def test_stopping_and_settling_do_not_count_as_missing_rotation_progress(self):
   o,p=self.make_turn(10);p.output(o,0)
-  o.imu_yaw=9;o.imu_rate=0
+  o.imu_yaw=9.6;o.imu_rate=0
   for now in (1.,1.5,2.,2.5,3.):
    p.output(o,now)
   self.assertTrue(p.done)

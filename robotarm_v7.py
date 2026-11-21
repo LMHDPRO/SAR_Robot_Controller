@@ -32,7 +32,7 @@ class RobotKinematics:
         self.max_reach = np.sum(np.abs(self.d)) + np.sum(np.abs(self.a))
         self.servo_offset = np.array([0.0, 126.5, 74.2, 106.0])
         self.servo_dir = np.array([1.0, -1.0, 1.0, -1.0])
-        self.startup_angles = np.array([90.0, 126.5, 74.2, 106.0])
+        self.startup_angles = np.array([108.5, 149.5, 180.0, 90.0])
         phys_min = np.array([0.0] * 4)
         phys_max = np.array([180.0] * 4)
         dh_bounds_1 = self.convert_angles(phys_min)
@@ -562,7 +562,7 @@ class MainWindow(QMainWindow):
         self.lbl_pinza = QLabel(f'Pinza (Gripper): {self.MANUAL_GRIPPER_MAX_DEG}°')
         self.slider_pinza = QSlider(Qt.Orientation.Horizontal)
         self.slider_pinza.setRange(0, self.MANUAL_GRIPPER_MAX_DEG)
-        self.slider_pinza.setValue(self.MANUAL_GRIPPER_MAX_DEG)
+        self.slider_pinza.setValue(60)
         self.slider_pinza.valueChanged.connect(lambda value: self.lbl_pinza.setText(f'Pinza (Gripper): {value}°'))
         for widget in (self.lbl_vel, self.slider_vel, self.lbl_pinza, self.slider_pinza):
             motion_layout.addWidget(widget)

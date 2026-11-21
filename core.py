@@ -188,13 +188,21 @@ class SingleEncoderMove:
         self.start=now;self.progress_at=now;self.progress=self.wheel_origin
         self.last_output_at=now;self.integral=0.0;self.filtered_rate=0.0;self.cap=max(1,min(int(cap),180))
         self.min_pwm=min(self.cap,max(1,int(min_pwm)));self.done=False;self.settle_at=None
+        self.final_turn = None
+        self.travel_at_stop = None
     def distance_cm(self,odom):
+        if self.travel_at_stop is not None:
+            return self.travel_at_stop
         position=(odom.left,odom.right)[self.index]
         return (position-self.wheel_origin)/10
     def output(self,odom,now):
         if now-self.start>25:raise RuntimeError('Single-encoder MOVE timed out')
         if not odom.imu_valid or odom.imu_segment!=self.segment:
             raise RuntimeError('IMU continuity lost: single-encoder MOVE cancelled')
+        if self.final_turn is not None:
+            wheels = self.final_turn.output(odom, now)
+            self.done = self.final_turn.done
+            return wheels
         position=(odom.left,odom.right)[self.index]
         if abs(position-self.progress)>1:
             self.progress=position;self.progress_at=now
@@ -206,7 +214,15 @@ class SingleEncoderMove:
         error=self.target-position
         if abs(error)<=3 or error*self.direction<=0:
             if self.settle_at is None:self.settle_at=now
-            self.done=now-self.settle_at>=.35
+            if now-self.settle_at>=.35:
+                remaining = self.heading_target - odom.imu_yaw
+                if abs(remaining) <= .5:
+                    self.done = True
+                elif abs(remaining) <= 15:
+                    self.travel_at_stop = self.distance_cm(odom)
+                    self.final_turn = ImuTurn(remaining, odom, None, now, self.cap, self.min_pwm, precise=True)
+                else:
+                    raise RuntimeError('Desvío de rumbo al finalizar el avance superior a 15 grados')
             return 0,0
         self.settle_at=None
         dt=max(0.0,min(now-self.last_output_at,.2))
@@ -239,6 +255,8 @@ class ImuTurn:
         self.progress=odom.imu_yaw;self.progress_at=now
         self.precise=precise;self.coast_until=now;self.pulse_until=None
         self.settle_min=self.settle_max=None;self.fine_started=None
+        self.fine_pwm_floor = 5
+        self.pulse_heading = None
         if precise:self.kind='imu_precise'
     def output(self,odom,now):
         if not odom.imu_valid or odom.imu_segment!=self.segment:
@@ -264,7 +282,7 @@ class ImuTurn:
         # Use a stable heading window: differentiating small sensor jitter can
         # report a large rate while the chassis is already stationary.
         rate=odom.imu_rate
-        if abs(error)<=2:
+        if abs(error)<=.5:
             if self.good_at is None:
                 self.good_at=now;self.settle_min=self.settle_max=odom.imu_yaw
             self.settle_min=min(self.settle_min,odom.imu_yaw)
@@ -281,9 +299,9 @@ class ImuTurn:
         if change*self.value<0 and abs(change)>8:
             raise RuntimeError('Turn / IMU sign inconsistent: verify polarity')
         if self.pulse_until is not None:
-            if now>=self.pulse_until or abs(error)<=2 or error*self.pulse_direction<=0:
+            if now>=self.pulse_until or abs(error)<=.5 or error*self.pulse_direction<=0:
                 self.pulse_until=None;self.coast_until=now+.5
-        if now<self.coast_until or abs(error)<=2:
+        if now<self.coast_until or abs(error)<=.5:
             self.progress_at=now
             return 0,0
         if now-self.progress_at>2:raise RuntimeError('No IMU rotation progress')
@@ -295,8 +313,14 @@ class ImuTurn:
             # Firmware ramps by 6 PWM / 10 ms; allow it to reach breakaway
             # PWM before ending the pulse. A 50 ms pulse can never reach 80.
             ramp_time=math.ceil(self.min_pwm/6)*.01
-            self.pulse_until=now+ramp_time+.01;self.pulse_direction=1 if error>0 else -1
+            if self.pulse_heading is not None and abs(odom.imu_yaw-self.pulse_heading)<.2:
+                self.fine_pwm_floor = min(self.min_pwm, self.fine_pwm_floor+20)
+            self.pulse_heading = odom.imu_yaw
+            duration = ramp_time if abs(error)<4 else ramp_time+.01
+            self.pulse_until=now+duration;self.pulse_direction=1 if error>0 else -1
         pwm=math.copysign(min(self.cap,max(self.min_pwm,abs(error)*1.2)),error)
+        if abs(error)<4:
+            pwm=math.copysign(min(abs(pwm),max(self.fine_pwm_floor,abs(error)*8)),error)
         return -pwm,pwm
 
 
@@ -333,12 +357,16 @@ def validate_routine(steps):
 class WheelCapture:
     """Raw encoder capture. A completed OR interrupted run can be calibrated."""
     kind='wheel'
-    def __init__(self,side,revolutions,t,g,now,pwm=85):
+    def __init__(self,side,revolutions,t,g,now,pwm=85,*,target_ticks=None):
         if side not in ('left','right') or not math.isfinite(revolutions) or not 0<revolutions<=10:
             raise ValueError('Choose left/right and 0.01 to 10 requested turns')
         self.side=side;self.index=0 if side=='left' else 1;self.requested=revolutions
         self.boot=t['boot_id'];self.start_ticks=(t['tl'],t['tr']);self.end_ticks=self.start_ticks
         self.g=g;self.target=revolutions*(g.tpr_l if side=='left' else g.tpr_r)
+        if target_ticks is not None:
+            if type(target_ticks) is not int or not 4 <= target_ticks <= 100000:
+                raise ValueError('Elige entre 4 y 100000 ticks')
+            self.target = target_ticks
         self.pwm=max(1,min(int(pwm),180));self.start=now;self.progress_at=now;self.progress=0
         self.signed_ticks=0;self.other_ticks=0;self.done=False;self.stopping=False
         self.reason='Running';self.stopped_at=None;self.valid=True
@@ -363,7 +391,7 @@ class WheelCapture:
             return (0,0)
         return (self.pwm,0) if self.index==0 else (0,self.pwm)
     def report(self):
-        return {'side':self.side,'requested':self.requested,'ticks':self.signed_ticks,
+        return {'side':self.side,'requested':self.requested,'target_ticks':self.target,'ticks':self.signed_ticks,
                 'other_ticks':self.other_ticks,'valid':self.valid,'reason':self.reason,
                 'done':self.done,'motor_sign':self.g.motor_l if self.index==0 else self.g.motor_r,'active':not self.stopping}
 

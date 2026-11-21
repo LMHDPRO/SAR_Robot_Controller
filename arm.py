@@ -10,7 +10,7 @@ class ArmKinematics:
         self.max_reach = float(np.sum(np.abs(self.d)) + np.sum(np.abs(self.a)))
         self.servo_offset = np.array([0.0, 126.5, 74.2, 106.0], dtype=float)
         self.servo_dir = np.array([1.0, -1.0, 1.0, -1.0], dtype=float)
-        self.startup_angles = np.array([90.0, 126.5, 74.2, 106.0], dtype=float)
+        self.startup_angles = np.array([108.5, 149.5, 180.0, 90.0], dtype=float)
         phys_min = np.zeros(4, dtype=float)
         phys_max = np.full(4, 180.0, dtype=float)
         dh_bounds_1 = self.convert_angles(phys_min)

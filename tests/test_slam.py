@@ -133,6 +133,32 @@ class SLAMTests(unittest.TestCase):
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_automatic_return_starts_one_routine_and_stops_on_finish(self):
+        from app import Window
+        from lidar_workspace import LidarWorkspace
+        from unittest.mock import Mock
+        with patch.object(LidarWorkspace, 'load'):
+            panel = LidarWorkspace()
+        panel.timer.stop()
+        panel.odom.setChecked(True)
+        panel.odom_ready = panel.lidar_fresh = True
+        panel.calibration_time = time.monotonic()
+        window = Mock()
+        window.engine.motion_block.return_value = ''
+        for name in ('primitive','live','routine','routine_running'):
+            setattr(window.engine,name,None)
+        window.cap.value.return_value = 85
+        window.move_encoder.currentText.return_value = 'Left'
+        panel.trial_motion_requested.connect(lambda mode: Window.run_lidar_trial(window,mode))
+        panel.stop_requested.connect(window.stop)
+        panel.trial_mode.setCurrentIndex(2)
+        with tempfile.TemporaryDirectory() as tmp, patch('lidar_workspace.__file__', str(Path(tmp)/'module.py')):
+            panel.trial_button.click()
+            window.engine.post.assert_called_once_with('routine',([('wait',2),('distance',30),('wait',1),('distance',-30)],85,'left'))
+            panel.trial_button.click()
+            window.stop.assert_called_once()
+        panel.shutdown()
+
     def test_manual_trial_records_telemetry_and_finishes_on_timeout(self):
         import json
         from lidar_workspace import LidarWorkspace
@@ -323,6 +349,8 @@ class WorkspaceTests(unittest.TestCase):
         from lidar_workspace import LidarWorkspace
         with patch.object(LidarWorkspace,'load'):panel=LidarWorkspace()
         panel.timer.stop();panel.draw_robot(np.array([1.,2.,math.pi/2]))
+        tail, tip = np.column_stack(panel.robot_direction.getData())[:2]
+        np.testing.assert_allclose(tip-tail, [0., -.16], atol=1e-8)
         x,y=panel.robot_body_item.getData()
         np.testing.assert_allclose([x[1],y[1]],[1.115,2.115],atol=1e-8)
         x,y=panel.robot_sensor_item.getData()

@@ -31,7 +31,8 @@ Adafruit_SSD1306 oled(128,64,&Wire,-1);
 Adafruit_PWMServoDriver pca(PCA_ADDR, Wire);
 bool oledReady=false,pcaReady=false;
 constexpr uint8_t ARM_SERVO_COUNT=6;
-float armAngles[ARM_SERVO_COUNT]={90.0f,126.5f,74.2f,90.0f,106.0f,75.0f};
+constexpr float ARM_POWER_POSE[ARM_SERVO_COUNT]={108.5f,149.5f,180.0f,90.0f,90.0f,60.0f};
+float armAngles[ARM_SERVO_COUNT];
 float armStart[ARM_SERVO_COUNT],armTarget[ARM_SERVO_COUNT];
 bool armMoving=false;
 uint32_t armStartedAt=0,armDurationMs=0,lastArmWrite=0;
@@ -65,7 +66,7 @@ uint16_t usToTicks(int us){
 }
 int angleToUs(uint8_t channel,float angle){
   angle=channel==5?constrain(angle,10.0f,75.0f):constrain(angle,0.0f,180.0f);
-  return map(static_cast<int>(lroundf(angle)),0,180,600,2400);
+  return lroundf(600.0f+10.0f*angle);
 }
 void writeArmAngles(){
   if(!pcaReady)return;
@@ -174,7 +175,16 @@ void parseCommand(){
   if(!strcmp(rx,"STATUS")){lastTelemetry=millis()-100;return;}
   if(!strcmp(rx,"STOP")){halt(false);return;}
   if(!strcmp(rx,"POWER:0")){halt(true);return;}
-  if(!strcmp(rx,"POWER:1")&&pwmOK&&!emergencyActive()&&!estopLatched){halt(false);relays(true);armed=true;timeoutActive=false;lastCommand=millis();return;}
+  if(!strcmp(rx,"POWER:1")&&pwmOK&&!emergencyActive()&&!estopLatched){
+    halt(false);
+    if(!armed){
+      if(!pcaReady)return;
+      memcpy(armAngles,ARM_POWER_POSE,sizeof armAngles);
+      writeArmAngles();
+      relays(true);
+    }
+    armed=true;timeoutActive=false;lastCommand=millis();return;
+  }
   int arm[ARM_SERVO_COUNT],duration=0,armFields=0;
   if(sscanf(rx,"ARM:%d,%d,%d,%d,%d,%d,%d%n",
       &arm[0],&arm[1],&arm[2],&arm[3],&arm[4],&arm[5],&duration,&armFields)==7
@@ -204,6 +214,7 @@ int ramp(int v,int target){
   return max(v-6,target);
 }
 void setup(){
+  memcpy(armAngles,ARM_POWER_POSE,sizeof armAngles);
   Serial.begin(115200);bootId=esp_random();
   preferences.begin("sar",false);cutRelaysOnLoss=preferences.getBool("cut_loss",false);
   if(ESTOP_PIN>=0)pinMode(ESTOP_PIN,INPUT_PULLUP);

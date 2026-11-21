@@ -120,12 +120,12 @@ class ArmControlTests(unittest.TestCase):
 
         packet.update(seq=2, deadman=1, motion_enabled=1)
         engine.process_pad(dict(packet), now + 0.05)
-        self.assertEqual(engine.arm_target_angles[3], 106.0)
+        self.assertEqual(engine.arm_target_angles[3], 90.0)
 
         packet.update(seq=3, arm_filtered_y=100)
         engine.process_pad(dict(packet), now + 0.15)
 
-        self.assertEqual(engine.robot.messages[-1], "ARM:90,126,74,90,104,75,150\n")
+        self.assertEqual(engine.robot.messages[-1], "ARM:108,150,180,90,88,60,150\n")
 
     def test_coco_joint_mode_controls_wrist_rotation_and_gripper(self):
         engine = self.ready_engine(owner="COCO")
@@ -153,14 +153,14 @@ class ArmControlTests(unittest.TestCase):
         packet.update(seq=3, arm_filtered_y=100)
         engine.process_pad(dict(packet), now + 0.15)
 
-        self.assertEqual(engine.arm_target_rotation, 93.0)
-        self.assertEqual(engine.robot.messages[-1], "ARM:90,126,74,93,106,75,150\n")
+        self.assertAlmostEqual(engine.arm_target_rotation, 93.0)
+        self.assertEqual(engine.robot.messages[-1], "ARM:108,150,180,93,90,60,150\n")
 
         packet.update(seq=4, arm_joint_index=5, arm_filtered_y=-100)
         engine.process_pad(dict(packet), now + 0.25)
 
-        self.assertAlmostEqual(engine.arm_target_gripper, 72.0)
-        self.assertEqual(engine.robot.messages[-1], "ARM:90,126,74,93,106,72,150\n")
+        self.assertAlmostEqual(engine.arm_target_gripper, 57.0)
+        self.assertEqual(engine.robot.messages[-1], "ARM:108,150,180,93,90,57,150\n")
 
     def test_coco_modes_b_and_c_follow_legacy_smooth_gamepad_motion(self):
         results = []

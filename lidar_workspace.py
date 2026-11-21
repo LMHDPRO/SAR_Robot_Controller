@@ -23,6 +23,7 @@ class LidarWorkspace(QtWidgets.QWidget):
     straight_pressed = QtCore.Signal(int)
     stop_requested = QtCore.Signal()
     turn_requested = QtCore.Signal(float)
+    trial_motion_requested = QtCore.Signal(int)
 
     def __init__(self):
         super().__init__()
@@ -71,9 +72,11 @@ class LidarWorkspace(QtWidgets.QWidget):
         self.button(form, 'Nuevo mapa / aplicar ajustes', self.reset_map)
         self.tracking_status=QtWidgets.QLabel('LiDAR: desconectado · Mapa: esperando datos');self.tracking_status.setWordWrap(True);form.addRow(self.tracking_status)
         self.trial_mode = QtWidgets.QComboBox()
-        self.trial_mode.addItems(['Quieto (30 s)', 'Giro manual de 90° (30 s)', 'Avance y regreso manual (30 s)'])
+        self.trial_mode.addItems(['Quieto (30 s)', 'Automático: giro +90°', 'Automático: avanzar 30 cm y regresar'])
         form.addRow('Prueba corta', self.trial_mode)
         self.trial_button = self.button(form, 'Grabar prueba', self.toggle_trial)
+        self.trial_mode.currentIndexChanged.connect(lambda i:self.trial_button.setText('Iniciar movimiento y grabar' if i else 'Grabar prueba'))
+        self.trial_motion_active = False
         self.trial_status = QtWidgets.QLabel()
         self.trial_status.setWordWrap(True)
         form.addRow(self.trial_status)
@@ -162,7 +165,7 @@ class LidarWorkspace(QtWidgets.QWidget):
         self.plot.addLine(y=0, pen=pg.mkPen('#aa6458'))
         origin = pg.TextItem('Origen (0, 0)', color='#dedede', anchor=(0,1))
         self.plot.addItem(origin)
-        self.plot.setToolTip('Flecha naranja: frente estimado del AGV. Flecha azul: retorno detectado más cercano al LiDAR; no indica dirección de marcha.')
+        self.plot.setToolTip('La flecha naranja marca 180° respecto al eje X del robot.')
         self.inspection_plot=pg.PlotWidget(title='Vista relativa al AGV · verde: usado · naranja: excluido')
         self.inspection_plot.setAspectLocked(True);self.inspection_plot.showGrid(x=True,y=True)
         self.inspection_plot.setLabel('bottom','Adelante (+X)','m');self.inspection_plot.setLabel('left','Izquierda (+Y)','m')
@@ -201,7 +204,7 @@ class LidarWorkspace(QtWidgets.QWidget):
         self.robot_body_item.setData(body[:,0],body[:,1])
         self.robot_sensor_item.setData(sensor[:,0],sensor[:,1])
         direction=np.array([math.cos(pose[2]),math.sin(pose[2])])
-        arrow=self.arrow_towards(np.asarray(pose[:2]),direction)
+        arrow=self.arrow_towards(np.asarray(pose[:2]),-direction)
         self.robot_direction.setData(arrow[:,0],arrow[:,1])
     @staticmethod
     def arrow_towards(origin,direction):
@@ -358,6 +361,10 @@ class LidarWorkspace(QtWidgets.QWidget):
         if not self.lidar_fresh or not self.odom_ready or not self.use_odom or not self.mapping.isChecked():
             self.trial_status.setText('Conecta AGV y LiDAR, inicia el escaneo y activa mapa y odometría.')
             return
+        if self.trial_mode.currentIndex() and (self.reference_lost or self.calibration_time is None or
+                                               time.monotonic()-self.calibration_time > 1):
+            self.trial_status.setText('Espera un escaneo reciente y una referencia de odometría válida.')
+            return
         folder = Path(__file__).with_name('capturas_lidar')
         try:
             folder.mkdir(exist_ok=True)
@@ -370,9 +377,13 @@ class LidarWorkspace(QtWidgets.QWidget):
         self.trial_scans = self.trial_accepted = self.trial_rejected = 0
         self.trial_mode.setEnabled(False)
         self.trial_button.setText('Terminar y guardar')
-        self.trial_status.setText('Grabando 30 s. Puedes usar los controles sobre el mapa.')
+        self.trial_status.setText('Grabando 30 s. STOP AGV cancela el movimiento.')
         self.trial_event('inicio', prueba=self.trial_mode.currentText(), mount=self.mount, mask=self.mask,
                          odometry=self.odom_mode.currentText(), generation=self.generation)
+        mode = self.trial_mode.currentIndex()
+        if self.trial_file and mode:
+            self.trial_motion_active = True
+            self.trial_motion_requested.emit(mode)
 
     def trial_event(self, event, **data):
         if self.trial_file:
@@ -385,13 +396,16 @@ class LidarWorkspace(QtWidgets.QWidget):
     def finish_trial(self, error=None):
         if self.trial_file is None:
             return
+        if self.trial_motion_active:
+            self.trial_motion_active = False
+            self.stop_requested.emit()
         try:
             self.trial_file.close()
         except OSError as exc:
             error = str(exc)
         self.trial_file = None
         self.trial_mode.setEnabled(True)
-        self.trial_button.setText('Grabar prueba')
+        self.trial_button.setText('Iniciar movimiento y grabar' if self.trial_mode.currentIndex() else 'Grabar prueba')
         self.trial_status.setText(error or f'{self.trial_scans} escaneos · {self.trial_accepted} localizados · '
                                   f'{self.trial_rejected} rechazados. Archivo: {self.trial_path.name}')
 
@@ -400,7 +414,8 @@ class LidarWorkspace(QtWidgets.QWidget):
             telemetry = state.get('telemetry', {})
             self.trial_event('agv', ticks=[telemetry.get('tl'), telemetry.get('tr')],
                              **{key: state.get(key) for key in ('host_monotonic','age','fresh','imu_valid','imu_yaw',
-                                'imu_segment','pose_revision','single_left','single_right','x','y','yaw')})
+                                'imu_segment','pose_revision','single_left','single_right','x','y','yaw',
+                                'routine_step','result','sent_pwm')})
 
         telemetry=state.get('telemetry',{})
         self.agv_telemetry_fresh=bool(state.get('fresh'))
@@ -480,6 +495,8 @@ class LidarWorkspace(QtWidgets.QWidget):
         age = time.monotonic() - stats['last_rx'] if stats['last_rx'] else float('inf')
         self.lidar_fresh=bool(self.live and stats['connected'] and age<.5)
         scan_age=time.monotonic()-self.calibration_time if self.calibration_time is not None else float('inf')
+        if self.trial_motion_active and (not self.lidar_fresh or scan_age>1 or not self.odom_ready or self.reference_lost):
+            self.finish_trial(error='Movimiento detenido: se perdió el LiDAR, la odometría o la referencia.')
         reception=('sin conexión' if not stats['connected'] else 'recibiendo escaneos' if scan_age<2 else 'recibe datos, sin escaneo reciente') if self.live else 'captura histórica'
         self.tracking_status.setText(f'LiDAR: {reception}\nMapa: {self.map_status}')
         if self.live and scan_age>=2:

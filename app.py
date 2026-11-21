@@ -62,7 +62,7 @@ class Engine(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True);self.signals=Signals();self.commands=queue.Queue();self.quit=False
         self.robot=self.pad=None;self.g=Geometry();self.odom=Odometry();self.telemetry={}
-        self.arm_model=ArmKinematics();self.arm_angles=self.arm_model.startup_angles.copy();self.arm_gripper=75.0;self.arm_rotation=90.0
+        self.arm_model=ArmKinematics();self.arm_angles=self.arm_model.startup_angles.copy();self.arm_gripper=60.0;self.arm_rotation=90.0
         self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper
         self.arm_target_rotation=self.arm_rotation
         self.arm_busy=False;self.arm_error='';self.arm_approach=None;self.collection_sequence=None;self.pickup_sequence=None;self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
@@ -496,7 +496,7 @@ class Engine(threading.Thread):
             dl=self.odom.tick_delta(self.telemetry['tl'],self.wheel_mark[0]);dr=self.odom.tick_delta(self.telemetry['tr'],self.wheel_mark[1]);dl,dr=self.g.wheel_ticks(dl,dr)
             self.test_result=f'Wheel measurement ({count:g} physical revolutions): delta L={dl}, R={dr}; candidate TPR L={abs(dl)/count:.3f}, R={abs(dr)/count:.3f}. Apply ONLY the wheel actually rotated. No automatic changes.'
             self.emit(self.test_result)
-        elif k=='wheel_test':
+        elif k in ('wheel_test','wheel_ticks'):
             reason=self.motion_block()
             if reason:raise ValueError(reason)
             side,revs,pwm=v
@@ -504,7 +504,8 @@ class Engine(threading.Thread):
                 raise ValueError('Connect AGV, choose PC and switch POWER ON')
             if self.live or self.primitive or self.routine or self.capture:raise ValueError('Stop the current action first')
             self.last_wheel_test=None
-            self.capture=WheelCapture(side,revs,self.telemetry,Geometry(**asdict(self.g)),time.monotonic(),pwm)
+            self.capture=WheelCapture(side,revs if k=='wheel_test' else 1,self.telemetry,Geometry(**asdict(self.g)),time.monotonic(),pwm,
+                                      target_ticks=revs if k=='wheel_ticks' else None)
             self.test_result='Wheel capture running. STOP keeps partial ticks. Map paused for this bench test.'
         elif k=='wheel_apply':
             observed,forward=v
@@ -858,7 +859,7 @@ class ArmPreview(QtWidgets.QWidget):
     def __init__(self,parent=None):
         super().__init__(parent)
         self.setMinimumSize(300,260);self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,QtWidgets.QSizePolicy.Policy.Expanding)
-        self.points=[];self.position=np.zeros(3);self.gripper=75.0
+        self.points=[];self.position=np.zeros(3);self.gripper=60.0
         model=ArmKinematics()
         self.set_pose(model,model.startup_angles,self.gripper)
     def set_pose(self,model,angles,gripper):
@@ -902,7 +903,7 @@ class Window(QtWidgets.QMainWindow):
         self.last_report=None;self.last_geometry=None;self.holding=False;self.routine_steps=[]
         self.arm_preview_send_button=QtWidgets.QPushButton()
         self.arm_preview_send_button.hide()
-        self.arm_model=ArmKinematics();self.arm_preview_angles=self.arm_model.startup_angles.copy();self.arm_preview_gripper=75.0;self.arm_inputs_syncing=False;self.arm_preview_valid=True
+        self.arm_model=ArmKinematics();self.arm_preview_angles=self.arm_model.startup_angles.copy();self.arm_preview_gripper=60.0;self.arm_inputs_syncing=False;self.arm_preview_valid=True
         central=QtWidgets.QWidget();self.setCentralWidget(central);outer=QtWidgets.QVBoxLayout(central)
         top=QtWidgets.QHBoxLayout();outer.addLayout(top)
         brand=QtWidgets.QLabel('SAR 1.6');brand.setStyleSheet('font-size:21px;color:#7ce1d8;font-weight:bold');top.addWidget(brand)
@@ -958,7 +959,8 @@ class Window(QtWidgets.QMainWindow):
         self.cal_status=QtWidgets.QLabel('1. Lift both wheels. Choose a wheel and start.');self.cal_status.setWordWrap(True);cal.addWidget(self.cal_status)
         f=QtWidgets.QFormLayout();cal.addLayout(f)
         self.cal_side=QtWidgets.QComboBox();self.cal_side.addItems(['Left','Right']);f.addRow('Wheel',self.cal_side)
-        self.cal_turns=self.number(.05,10,1,' rev');f.addRow('Requested turns',self.cal_turns)
+        self.cal_ticks=QtWidgets.QSpinBox();self.cal_ticks.setRange(4,100000);self.cal_ticks.setValue(500)
+        f.addRow('Parar al alcanzar (ticks)',self.cal_ticks)
         self.cal_pwm=QtWidgets.QSpinBox();self.cal_pwm.setRange(1,180);self.cal_pwm.setValue(110);f.addRow('Constant test PWM',self.cal_pwm)
         r=QtWidgets.QHBoxLayout();cal.addLayout(r)
         self.button(r,'START WHEEL TEST',self.start_wheel);self.button(r,'STOP / KEEP TICKS',self.stop)
@@ -1066,6 +1068,7 @@ class Window(QtWidgets.QMainWindow):
         self.lidar_workspace.straight_pressed.connect(lambda direction: self.drive((direction, direction)))
         self.lidar_workspace.stop_requested.connect(self.stop)
         self.lidar_workspace.turn_requested.connect(lambda angle: self.test('imu_precise', angle))
+        self.lidar_workspace.trial_motion_requested.connect(self.run_lidar_trial)
         self.workspaces.addTab(self.lidar_workspace,'LiDAR / SLAM')
         self.workspaces.addTab(self.routine_scroll,'Rutinas')
         right.removeWidget(self.notice);outer.addWidget(self.notice)
@@ -1142,7 +1145,7 @@ class Window(QtWidgets.QMainWindow):
         grip_layout=QtWidgets.QVBoxLayout(grip_group)
         self.arm_gripper_label=QtWidgets.QLabel()
         self.arm_gripper_slider=QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.arm_gripper_slider.setRange(10,75);self.arm_gripper_slider.setValue(75)
+        self.arm_gripper_slider.setRange(10,75);self.arm_gripper_slider.setValue(60)
         self.arm_gripper_slider.valueChanged.connect(self.update_arm_preview)
         grip_layout.addWidget(self.arm_gripper_label);grip_layout.addWidget(self.arm_gripper_slider)
         layout.addWidget(grip_group)
@@ -1220,7 +1223,17 @@ class Window(QtWidgets.QMainWindow):
         if encoder_side is not None:command+=(encoder_side,)
         self.engine.post('primitive',command)
     def start_wheel(self):
-        self.engine.post('wheel_test',(self.cal_side.currentText().lower(),self.cal_turns.value(),self.cal_pwm.value()))
+        self.engine.post('wheel_ticks',(self.cal_side.currentText().lower(),self.cal_ticks.value(),self.cal_pwm.value()))
+
+    def run_lidar_trial(self, mode):
+        reason = self.engine.motion_block()
+        if reason or self.engine.primitive or self.engine.live or self.engine.routine or self.engine.routine_running or not self.engine.odom.imu_valid:
+            self.lidar_workspace.trial_motion_active = False
+            self.lidar_workspace.finish_trial(error=reason or 'Detén el movimiento actual y comprueba que la IMU esté lista.')
+            return
+        steps = [('wait', 2), ('imu_precise', 90)] if mode == 1 else [
+            ('wait', 2), ('distance', 30), ('wait', 1), ('distance', -30)]
+        self.engine.post('routine', (steps, self.cap.value(), self.move_encoder.currentText().lower()))
     def preview_correction(self,*args):
         try:
             tpr,sign,motor=wheel_correction(self.last_report,self.observed.value(),1 if self.forward.currentIndex()==0 else -1)
@@ -1343,7 +1356,7 @@ class Window(QtWidgets.QMainWindow):
         if report!=self.last_report:
             self.last_report=dict(report) if report else None
             if report:
-                self.capture_label.setText(f"{report['side'].upper()} ticks: {report['ticks']:+d}\nOther wheel: {report['other_ticks']:+d} | {report['reason']}")
+                self.capture_label.setText(f"{report['side'].upper()} · objetivo {report['target_ticks']:g} ticks · medidos {report['ticks']:+d}\nOtra rueda: {report['other_ticks']:+d} | {report['reason']}")
             else:self.capture_label.setText('Recorded ticks: —')
             self.preview_correction()
         self.cal_status.setText('BENCH TEST: map paused; both wheels must be lifted.' if s['capture_active'] else 'Choose wheel → test → enter actual turns → Apply & Save.')

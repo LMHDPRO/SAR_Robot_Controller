@@ -70,6 +70,9 @@ class LidarCalibrationWizard(QtWidgets.QDialog):
         preview.clicked.connect(lambda:self.adjust_angle(self.angle_spin.value()));orientation_layout.addWidget(preview)
         keep=QtWidgets.QPushButton('Usar orientación actual y ajustar solo el sector')
         keep.clicked.connect(self.keep_orientation);orientation_layout.addWidget(keep)
+        flip=QtWidgets.QPushButton('Probar montaje y máscara a 180° del ajuste guardado')
+        flip.clicked.connect(lambda:self.preview_opposite_mount(sector_center,sector_width))
+        orientation_layout.addWidget(flip)
         mask_page=QtWidgets.QWidget();mask_layout=QtWidgets.QVBoxLayout(mask_page)
         mask_layout.setContentsMargins(0,0,0,0);form=QtWidgets.QFormLayout();mask_layout.addLayout(form)
         self.center,self.center_slider=self.sector_control(form,'Centro excluido (°): 0 frente, ±180 atrás',-180,180,sector_center)
@@ -115,6 +118,19 @@ class LidarCalibrationWizard(QtWidgets.QDialog):
     def keep_orientation(self):
         self.candidate=self.current_angle;self.selected=None;self.live=False;self.selection.setData([],[])
         self.set_stage(1);self.fit_points()
+
+    def preview_opposite_mount(self, saved_center, saved_width):
+        def opposite(angle):
+            return angle - 180 if angle > 0 else angle + 180
+
+        angle = opposite(self.current_angle)
+        self.angle_spin.setValue(angle)
+        self.adjust_angle(angle)
+        self.center.setValue(round(opposite(saved_center)))
+        self.width.setValue(round(saved_width))
+        self.still.setChecked(False)
+        self.set_stage(1)
+        self.fit_points()
 
     def adjust_angle(self,value):
         self.angle_slider.blockSignals(True);self.angle_slider.setValue(round(value*10));self.angle_slider.blockSignals(False)

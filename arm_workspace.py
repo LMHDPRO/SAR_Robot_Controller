@@ -67,7 +67,7 @@ class ArmWorkspace(MainWindow):
             box.setChecked(False);self._show_msg(reason,True);return
         # Rebase the virtual arm on firmware PWM estimates before live motion.
         self.cancel_motion(clear_options=False)
-        self.sync_pose(self.state['arm_angles'],self.state.get('arm_gripper',75))
+        self.sync_pose(self.state['arm_angles'],self.state.get('arm_gripper',60))
         self._show_msg('Control físico habilitado desde la pose PWM estimada. No es una medición articular.')
 
     def sync_pose(self,angles,gripper):
@@ -97,7 +97,7 @@ class ArmWorkspace(MainWindow):
         physical=any(b.isChecked() for b in (self.chk_live,self.chk_path_physical))
         if physical and self.block_reason():self.cancel_motion()
         if self.engine.source=='COCO' and state.get('fresh'):
-            self.sync_pose(state.get('arm_angles'),state.get('arm_gripper',75))
+            self.sync_pose(state.get('arm_angles'),state.get('arm_gripper',60))
 
     def cancel_motion(self,clear_options=True):
         self.path_active=False;self.planned_path=[]
