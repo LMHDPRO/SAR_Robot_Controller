@@ -120,16 +120,23 @@ V7 permitía 90° de apertura automática; el adaptador usa 75° para respetar l
 | Deadman | 10 |
 | OLED SDA/SCL | 11 / 12 |
 
-### Control del brazo desde COCO
+### COCO OS 1.1
 
-- **A · Joint:** girar el encoder para seleccionar uno de los seis canales PCA9685; el eje vertical del joystick del brazo suma o resta grados al canal seleccionado. CH0–CH4 usan 0–180° y CH5 (pinza) 10–75°. El modo A no mueve el AGV.
-- **B · Gamepad:** conserva el control legacy: el eje horizontal cambia el ángulo de base y el vertical acerca/aleja el objetivo radialmente; el IK CCD avanza en pasos limitados hacia el objetivo. El encoder cambia Z o pinza, según su botón.
-- **C · TCP:** queda temporalmente igual que B y reutiliza el IK CCD actual; no es aún un controlador TCP independiente.
-- El OLED de COCO muestra la XYZ estimada actual del brazo y el estado de conducción; el detalle de AGV sigue en la pantalla Debug / AGV INFO. Son estimaciones PWM/FK, no mediciones con encoders articulares.
-- Los tres modos requieren COCO como propietario, AGV listo, deadman y joystick centrado antes de habilitar movimiento. La casilla global **Live Robot Arm movement** conserva el control continuo entre pestañas; al desactivarla deja de enviar poses. **Enviar pose (prueba)** en el panel Brazo manda una pose puntual y queda deshabilitada durante Live. Al cambiar de pestaña, el STOP global sigue actuando cuando Live está apagado.
-- Al avanzar o retroceder con COCO o con los botones de PC, el rumbo del IMU se fija al comenzar y el control corrige la diferencia de ruedas. Al soltar, invertir o girar se libera esa referencia. Si falta el IMU o se pierde su continuidad, se detiene el avance y COCO requiere liberar el deadman antes de volver a habilitarlo. Los giros manuales siguen siendo libres. En las rutinas, los desplazamientos usan el encoder seleccionado en **Drive** y el IMU; los giros usan el modo preciso. Las rutas guardadas con los nombres anteriores se interpretan con esos modos.
+- **A · JOINTS.** El encoder selecciona uno de los seis canales PCA9685 y el eje vertical del joystick del brazo ajusta sus grados. El OLED resalta la articulación sobre el modelo isométrico. CH0–CH4 usan 0–180° y CH5 (pinza) 10–75°.
+- **B · DUAL.** Control combinado con una mitad del OLED para el AGV y la otra para el brazo. El joystick del brazo ajusta el ángulo de base y el alcance radial. El botón A alterna `XY` y `RxRy`, y el botón del encoder alterna `Z` y `GRIP`.
+- **C · TCP.** Muestra `X`, `Y`, `Z` en mm y los submodos activos. Reutiliza el control cartesiano de Python. `ARM EST` identifica la pose estimada a partir de PWM y cinemática directa. `--` indica datos no disponibles.
+- **D · AGV.** Control de la base con brújula de rumbo relativo, distancia y velocidad. En `AGV` y `DUAL`, las barras L/R tienen cero al centro, reversa a la izquierda y avance a la derecha.
+- Mantén B para abrir el menú y pulsa B para salir. Mueve el joystick B arriba o abajo para cambiar de fila. Gira el encoder para aplicar la opción directamente. En `RELAYS`, el giro aplica `ON` u `OFF` según el sentido, con el deadman suelto y los joysticks centrados. El armado compartido del AGV carga la pose inicial del brazo.
+- `TAKE CTRL` y `GIVE TO PC` esperan confirmación de Python, que detiene las órdenes previas. Antes de volver a conducir desde COCO, suelta el deadman, centra los joysticks y vuelve a pulsarlo.
+- `ARM SPEED` y `AGV SPEED` ajustan perfiles independientes. En `MID`, cada clic de Z equivale a 5.5 mm en `FINE` y 11 mm en `NORMAL`.
+- `PRECISE TURN` alterna `ON` y `OFF`. En la pantalla `AGV`, gira el encoder con el deadman suelto para elegir 45°, 90° o 180° para `AGV` y `DUAL`. Con el deadman activo, inclina el joystick del AGV a izquierda o derecha para iniciar un giro. Centra el joystick antes de solicitar el siguiente. Python usa el BNO055 y cancela el giro si se libera el deadman o se pierde el control o el rumbo válido.
+- Al avanzar o retroceder con COCO o desde la PC, el rumbo del IMU se fija al comenzar. Si falta el IMU o se pierde su continuidad, se detiene el avance. En las rutinas, los desplazamientos usan el encoder seleccionado en **Drive** y el IMU. Los giros de las rutinas usan el modo preciso.
 
-Bibliotecas Arduino: WiFi/Wire/Preferences incluidas en ESP32; Adafruit BNO055, Unified Sensor, GFX, SSD1306, PWM Servo Driver y sus dependencias. El constructor correcto es `Adafruit_PWMServoDriver pca(PCA_ADDR, Wire);`. Usar la placa/PSRAM/flash correspondientes a cada módulo. El firmware conserva la API ESP32 Arduino 3.x del proyecto original; no se compiló aquí con tu placa.
+El sketch COCO se compila para **Arduino Nano ESP32** con **Pin Numbering → By GPIO number (legacy)**. En Arduino CLI, el identificador es `esp32:esp32:nano_nora:PinNumbers=byGPIONumber`.
+
+En la PC, **Live Robot Arm movement** conserva el control continuo entre pestañas. Al desactivarla, deja de enviar poses. **Enviar pose (prueba)** en el panel Brazo manda una pose puntual y queda deshabilitada durante Live. Al cambiar de pestaña con Live apagado, se activa el STOP global.
+
+WiFi, Wire y Preferences vienen con ESP32 Arduino 3.x. El proyecto usa Adafruit BNO055, Unified Sensor, GFX, SSD1306, PWM Servo Driver y sus dependencias. El constructor del AGV es `Adafruit_PWMServoDriver pca(PCA_ADDR, Wire);`. Usa la configuración de placa, PSRAM y flash correspondiente a cada módulo.
 
 ## Secuencia de operación
 

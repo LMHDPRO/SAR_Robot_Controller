@@ -58,6 +58,14 @@ class Signals(QtCore.QObject):
     state=QtCore.Signal(object)
     message=QtCore.Signal(str)
 
+COCO_ARM_SPEED = (.25, .55, 1.0)
+COCO_AGV_SPEED = (85, 110, 135)
+
+
+def coco_level(value, default):
+    return value if type(value) is int and 0 <= value < 3 else default
+
+
 class Engine(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True);self.signals=Signals();self.commands=queue.Queue();self.quit=False
@@ -67,7 +75,12 @@ class Engine(threading.Thread):
         self.arm_target_rotation=self.arm_rotation
         self.arm_busy=False;self.arm_error='';self.arm_approach=None;self.collection_sequence=None;self.pickup_sequence=None;self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
         self.coco_arm_target_xyz=None;self.coco_arm_target_mode=None
+        self.coco_joint_index=None;self.coco_joint_delta=0.0
+        self.coco_wrist_delta=0.0;self.coco_grip_delta=0.0;self.coco_z_delta=0.0;self.coco_ik_budget=0.0
+        self.coco_owner_ack=None;self.coco_turn=None;self.coco_turn_state='IDLE';self.coco_turn_ready=False
+        self.coco_turn_progress=0.0
         self.last_robot=self.last_pad=0;self.pad_data={};self.pad_base=None;self.pad_released=False;self.pad_authorized=False
+        self.power_waiting=None
         self.live=None;self.live_heading=None;self.live_direction=0;self.routine_encoder='left';self.primitive=None;self.source='PC';self.last_ui=time.monotonic();self.path=deque(maxlen=10000)
         self.sent_pwm=(0,0)
         self.aruco_alignment=None;self.aruco_sample=None;self.aruco_status='';self.routine_running=False;self.routine_reference=None
@@ -115,7 +128,8 @@ class Engine(threading.Thread):
                 self.robot_connected_at=time.monotonic();self.last_robot=0;self.telemetry={}
                 link.send(('ESTOP' if self.estop_latched else 'STOP')+'\n'+f"POLICY:{int(self.runtime['cut_relays_on_loss'])}\nSTATUS\n")
             else:
-                self.last_pad=time.monotonic();self.pad_data={};self.power_seen=None
+                self.last_pad=time.monotonic();self.pad_data={};self.power_seen=None;self.coco_owner_ack=None
+                self.power_waiting=None
                 self.pad_authorized=False;self.pad_released=False
                 self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
             self.emit(f'{which}: conectado; movimiento requiere una orden nueva')
@@ -134,6 +148,8 @@ class Engine(threading.Thread):
         if self.capture:return 'Wheel capture still active: press STOP and wait for its result'
         return ''
     def halt(self,disarm=False):
+        if self.coco_turn is not None and self.coco_turn_state=='RUN':self.coco_turn_state='CANCEL'
+        self.coco_turn_ready=False
         self.arm_approach=None
         self.collection_sequence=None
         self.pickup_sequence=None
@@ -146,6 +162,8 @@ class Engine(threading.Thread):
         self.arm_target_rotation=self.arm_rotation;self.arm_busy=False
         self.coco_arm_at=None
         self.coco_arm_target_xyz=None;self.coco_arm_target_mode=None
+        self.coco_joint_index=None;self.coco_joint_delta=0.0
+        self.coco_wrist_delta=0.0;self.coco_grip_delta=0.0;self.coco_z_delta=0.0;self.coco_ik_budget=0.0
         if self.robot:
             try:
                 send=getattr(self.robot,'urgent',self.robot.send)
@@ -198,8 +216,12 @@ class Engine(threading.Thread):
             return
         elapsed=0.0 if self.coco_arm_at is None else min(.1,max(0.0,now-self.coco_arm_at))
         self.coco_arm_at=now
-        delta=max(-100.0,min(100.0,float(axis)))/100.0*30.0*elapsed
-        if abs(delta)<.001:return
+        if joint_index!=self.coco_joint_index or not axis:self.coco_joint_delta=0.0
+        self.coco_joint_index=joint_index
+        speed=COCO_ARM_SPEED[coco_level(p.get('arm_speed_level'),2)]
+        self.coco_joint_delta+=max(-100.0,min(100.0,float(axis)))/100.0*30.0*elapsed*speed
+        delta=self.coco_joint_delta
+        if abs(delta)<.5:return
         angles=self.arm_target_angles.copy()
         rotation=self.arm_target_rotation
         gripper=self.arm_target_gripper
@@ -214,9 +236,11 @@ class Engine(threading.Thread):
         if (np.max(np.abs(angles-self.arm_target_angles))<.5
                 and abs(rotation-self.arm_target_rotation)<.5
                 and abs(gripper-self.arm_target_gripper)<.5):
+            self.coco_joint_delta=0.0
             return
         try:
             self.send_arm_pose(angles,gripper,150,'COCO',rotation)
+            self.coco_joint_delta=0.0
         except ValueError as exc:
             self.arm_error=str(exc)
     def update_arm_from_coco(self,p,now):
@@ -249,58 +273,82 @@ class Engine(threading.Thread):
         self.coco_arm_z=z_request;self.coco_arm_grip=grip_request
         elapsed=0.0 if self.coco_arm_at is None else min(.05,max(0.0,now-self.coco_arm_at))
         self.coco_arm_at=now
-        if max(abs(axes[0]),abs(axes[1]))<.01 and abs(z_delta)<.001 and abs(grip_delta)<.001:
-            return
+        profiled='arm_speed_level' in p
+        speed=COCO_ARM_SPEED[coco_level(p.get('arm_speed_level'),2)]
+        z_delta*=speed;grip_delta*=speed
         target_angles=self.arm_target_angles.copy()
         current_xyz=self.arm_model.compute_fk(target_angles)[0]
         gripper=self.arm_target_gripper
         arm_mode=p.get('arm_mode','XY')
+        encoder_mode=p.get('encoder_mode','Z')
+        if encoder_mode not in ('Z','GRIP'):
+            self.arm_error='Unknown COCO arm encoder mode'
+            return
+        moving=max(abs(axes[0]),abs(axes[1]))>=.01
+        if arm_mode!=self.coco_arm_target_mode:
+            self.coco_wrist_delta=self.coco_grip_delta=self.coco_z_delta=self.coco_ik_budget=0.0
+            self.coco_arm_target_xyz=None
+            self.coco_arm_target_mode=arm_mode
+        if profiled:
+            self.coco_grip_delta+=grip_delta*.65 if encoder_mode=='GRIP' else 0.0
+            self.coco_z_delta=max(-15.0,min(15.0,self.coco_z_delta+z_delta)) if encoder_mode=='Z' else 0.0
+            z_delta=self.coco_z_delta
+        if not moving and abs(z_delta)<(1.0 if profiled else .001) and abs(grip_delta)<.001 and abs(self.coco_grip_delta)<.5:
+            if profiled and arm_mode=='XY':self.coco_arm_target_xyz=None
+            self.coco_wrist_delta=self.coco_ik_budget=0.0
+            return
+        elapsed*=speed
         if arm_mode=='XY':
-            if self.coco_arm_target_xyz is None or self.coco_arm_target_mode!=arm_mode:
+            if self.coco_arm_target_xyz is None:
                 self.coco_arm_target_xyz=current_xyz.copy()
-                self.coco_arm_target_mode=arm_mode
             target_xyz=self.coco_arm_target_xyz.copy()
-            if max(abs(axes[0]),abs(axes[1]))>=.01:
+            if moving:
                 x,y,z=target_xyz
                 radius=max(70.0,math.hypot(x,y)+axes[1]*100.0*elapsed)
                 theta=math.atan2(y,x)-axes[0]*0.4*elapsed
                 target_xyz[:2]=[radius*math.cos(theta),radius*math.sin(theta)]
-            target_xyz[2]+=z_delta
+            if not profiled:target_xyz[2]+=z_delta
             self.coco_arm_target_xyz=target_xyz.copy()
+            if profiled:target_xyz[2]+=z_delta
         elif arm_mode=='RX_RY':
-            target_angles[3]=max(0.0,min(180.0,target_angles[3]-axes[1]*30.0*elapsed))
-            gripper=max(10.0,min(75.0,gripper-axes[0]*30.0*elapsed))
+            wrist=-axes[1]*30.0*elapsed;grip=-axes[0]*30.0*elapsed
+            if profiled:
+                joint=target_angles[3]
+                self.coco_wrist_delta=max(-joint,min(180-joint,self.coco_wrist_delta+wrist)) if axes[1] else 0.0
+                self.coco_grip_delta+=grip
+                wrist=self.coco_wrist_delta;grip=0.0
+            target_angles[3]=max(0.0,min(180.0,target_angles[3]+wrist))
+            gripper=max(10.0,min(75.0,gripper+grip))
             target_xyz=self.arm_model.compute_fk(target_angles)[0]
             target_xyz[2]+=z_delta
-            self.coco_arm_target_mode=arm_mode
         else:
             self.arm_error='Unknown COCO arm mode'
             return
-        encoder_mode=p.get('encoder_mode','Z')
-        if encoder_mode=='Z':
-            target_xyz[2]=max(0.0,min(self.arm_model.max_reach,float(target_xyz[2])))
-        elif encoder_mode=='GRIP':
+        if encoder_mode=='GRIP' and not profiled:
             gripper=max(10.0,min(75.0,gripper+grip_delta*.65))
-        else:
-            self.arm_error='Unknown COCO arm encoder mode'
-            return
+        if profiled:
+            self.coco_grip_delta=max(10-gripper,min(75-gripper,self.coco_grip_delta))
+            gripper+=self.coco_grip_delta
         target_xyz[0]=max(-self.arm_model.max_reach,min(self.arm_model.max_reach,float(target_xyz[0])))
         target_xyz[1]=max(0.0,min(self.arm_model.max_reach,float(target_xyz[1])))
         target_xyz[2]=max(0.0,min(self.arm_model.max_reach,float(target_xyz[2])))
         radius=math.hypot(target_xyz[0],target_xyz[1])
         if radius<70.0:
             target_xyz[:2]=[70.0,0.0] if radius<0.1 else target_xyz[:2]*(70.0/radius)
-        needs_ik=(arm_mode=='XY' and (
-            max(abs(axes[0]),abs(axes[1]))>=.01 or abs(z_delta)>=.001)
-            or arm_mode=='RX_RY' and abs(z_delta)>=.001)
+        needs_ik=(arm_mode=='XY' and moving) or abs(z_delta)>=.001
         if needs_ik:
-            if arm_mode=='RX_RY':self.arm_model.last_ik_theta=self.arm_model.convert_angles(target_angles)
+            if profiled or arm_mode=='RX_RY':self.arm_model.last_ik_theta=self.arm_model.convert_angles(target_angles)
             distance=float(np.linalg.norm(target_xyz-current_xyz))
             if distance>15.0:
                 target_xyz=current_xyz+(target_xyz-current_xyz)*(15.0/distance)
-                if arm_mode=='XY':self.coco_arm_target_xyz=target_xyz.copy()
+                if arm_mode=='XY':
+                    self.coco_arm_target_xyz=target_xyz.copy()
+                    if profiled:self.coco_arm_target_xyz[2]-=z_delta
             distance=float(np.linalg.norm(target_xyz-current_xyz))
             max_step=100.0*elapsed
+            if profiled:
+                self.coco_ik_budget=min(5.0,self.coco_ik_budget+max_step)
+                max_step=self.coco_ik_budget
             if distance>0.5:
                 next_xyz=current_xyz+(target_xyz-current_xyz)*(min(distance,max_step)/distance)
             else:
@@ -312,6 +360,7 @@ class Engine(threading.Thread):
             if not success:
                 self.arm_error=f'COCO arm target rejected: {detail}'
                 self.coco_arm_target_xyz=current_xyz.copy()
+                self.coco_z_delta=self.coco_ik_budget=0.0
                 return
         else:
             angles=target_angles
@@ -320,6 +369,14 @@ class Engine(threading.Thread):
             return
         try:
             self.send_arm_pose(angles,gripper,150,'COCO')
+            if profiled:
+                if needs_ik:
+                    moved_z=float(self.arm_model.compute_fk(angles)[0][2]-current_xyz[2])
+                    if abs(z_delta)>=.001 and moved_z*z_delta>0:
+                        self.coco_z_delta=math.copysign(max(0.0,abs(z_delta)-abs(moved_z)),z_delta)
+                    if abs(self.coco_z_delta)<1.0:self.coco_z_delta=0.0
+                    if self.coco_arm_target_xyz is not None:self.coco_arm_target_xyz[2]=current_xyz[2]+moved_z
+                self.coco_wrist_delta=self.coco_grip_delta=self.coco_ik_budget=0.0
         except ValueError as exc:
             self.arm_error=str(exc)
     def handle_arm_pose(self,value):
@@ -465,8 +522,7 @@ class Engine(threading.Thread):
             self.emit(f'Saved {side} distance scale x{ratio:.4f} to settings.json; repeat 50 cm to verify')
         elif k=='stop':self.halt(bool(v))
         elif k=='source':
-            self.halt();self.source=v;self.pad_base=None
-            self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
+            self.set_control_owner(v)
         elif k=='arm_pose':self.handle_arm_pose(v)
         elif k=='arm_approach':self.start_arm_approach()
         elif k=='power':
@@ -584,14 +640,65 @@ class Engine(threading.Thread):
             self.live_heading=HeadingHold(self.odom,now)
         if not direction:self.live_heading=None
         self.live_direction=direction;self.live=wheels
+    def set_control_owner(self, owner):
+        self.epoch+=1
+        self.halt()
+        self.source=owner;self.pad_base=None
+        self.coco_arm_z=self.coco_arm_grip=None
+        self.coco_turn=None;self.coco_turn_state='IDLE';self.coco_turn_progress=0.0
+
+    def coco_imu_ready(self, now):
+        age=self.telemetry.get('imu_age_ms', 99999)
+        return (self.odom.imu_valid and Odometry.quality(self.telemetry)[0]
+                and now-self.last_robot+age/1000 <= .25)
+
+    def coco_turn_output(self, now):
+        try:
+            if not self.coco_imu_ready(now):raise RuntimeError('COCO turn cancelled: IMU stale')
+            wheels=self.coco_turn.output(self.odom, now)
+            self.coco_turn_progress=self.odom.imu_yaw-self.coco_turn.origin[3]
+            if self.coco_turn.done:
+                self.coco_turn_state='DONE';self.stopped=True
+            return wheels
+        except RuntimeError as exc:
+            self.halt();self.emit(str(exc))
+            return 0,0
+
+    def coco_state_frame(self, now):
+        fresh=bool(self.robot and now-self.last_robot<=.5)
+        t=self.telemetry
+        pose=fresh and t.get('arm_protocol')==1 and t.get('pca_ready')==1
+        channels=t.get('arm_angles')
+        pose=pose and isinstance(channels,list) and len(channels)==6 and all(
+            isinstance(value,(int,float)) and math.isfinite(value) and 0<=value<=180 for value in channels)
+        xyz,transforms=self.arm_model.compute_fk(self.arm_angles)
+        x,y,z=xyz
+        fault=int(bool(self.estop_latched or t.get('estop') or t.get('pwm_ok')==0 or t.get('protocol')!=1))
+        turn=self.coco_turn
+        target=turn.value if turn else 0
+        pwm_l,pwm_r=t.get('pl',0),t.get('pr',0)
+        if self.g.swap_lr:pwm_l,pwm_r=pwm_r,pwm_l
+        pwm_l*=self.g.motor_l;pwm_r*=self.g.motor_r
+        owner=int(self.source=='COCO')
+        frames=[f'CTRL:{owner}',
+                f"STATE:{x:.1f},{y:.1f},{z:.1f},0,0,0,{self.odom.v:.2f},{int(fresh)},{int(fresh and t.get('armed',0))},{fault}",
+                f"AGV:{(self.odom.left+self.odom.right)/20:.2f},{math.degrees(self.odom.yaw):.2f},{self.odom.v:.2f},{t.get('tl',0)},{t.get('tr',0)},{int(t.get('imu',0))}",
+                f'YAW:{self.odom.imu_yaw:.2f},{self.turn_delta:.2f},{self.odom.imu_yaw/360:.4f},{int(fresh and self.coco_imu_ready(now))}']
+        if self.pad_data.get('coco_os')==11:
+            frames.extend((f'COCO11:{int(pose)},{pwm_l:.0f},{pwm_r:.0f}',
+                           f'TURN:{self.coco_turn_state},{target:.0f},{self.coco_turn_progress:.1f}'))
+            if pose:
+                points=(value for transform in transforms for value in transform[:3,3])
+                frames.append('POSE:'+','.join(f'{v:.1f}' for v in (*channels,*points)))
+            if self.coco_owner_ack:
+                boot,request=self.coco_owner_ack
+                frames.append(f'OWNER:{boot},{request},{owner}')
+        return '\n'.join(frames)+'\n'
+
     def process_pad(self, p, now):
         if p.get('type') != 'coco':
             return
 
-        if self.estop_latched or self.telemetry.get('estop')==1:
-            self.halt(True);return
-        if now-self.last_ui>.6:
-            self.halt_loss();return
         previous = self.pad_data
         if (previous and p.get('boot_id') == previous.get('boot_id')
                 and p.get('seq') == previous.get('seq')):
@@ -600,34 +707,70 @@ class Engine(threading.Thread):
         restarted = bool(previous and p.get('boot_id') != previous.get('boot_id'))
         self.pad_data = dict(p)
         self.last_pad = now
+        modern = p.get('coco_os')==11
+        axes = [p.get(key, 0) for key in ('agv_filtered_x','agv_filtered_y','arm_filtered_x','arm_filtered_y')]
+        centered = all(isinstance(value,(int,float)) and abs(value)<=10 for value in axes)
         pair = (p.get('boot_id'), p.get('power_request_id', 0))
         if restarted:
             if self.source == 'COCO':
                 self.halt(False)
             self.power_seen = pair
+            self.power_waiting=None
+            self.coco_owner_ack=None
             return
 
+        owner_id=p.get('owner_request_id')
+        owner_pair=(p.get('boot_id'), owner_id)
+        if (modern and p.get('owner_pending')==1 and type(owner_id) is int and owner_id>0
+                and type(owner_pair[0]) is int and owner_pair!=self.coco_owner_ack):
+            self.coco_owner_ack=owner_pair
+            requested=p.get('owner_target')
+            if (requested in ('PC','COCO') and p.get('menu_open') and not p.get('debug_open')
+                    and not p.get('deadman') and not p.get('motion_enabled') and centered
+                    and now-self.last_ui<=.6):
+                self.set_control_owner(requested)
+                self.emit(f'Control: {requested} (COCO OS)')
+            return
+
+        if self.estop_latched or self.telemetry.get('estop')==1:
+            self.halt(True);return
+        if now-self.last_ui>.6:
+            self.halt_loss();return
+
+        if not p.get('power_pending'):self.power_waiting=None
+        if pair==self.power_waiting:
+            # Let the robot link flush the relay command while COCO waits for telemetry.
+            return
         if getattr(self, 'power_seen', None) is None:
             self.power_seen = pair
         if pair != self.power_seen:
             self.power_seen = pair
-            if p.get('power_pending') and self.source == 'COCO':
+            if (p.get('power_pending') and self.source=='COCO'
+                    and (p.get('mode')!='D' or not p.get('power_enable')
+                         or (p.get('menu_open') and not p.get('debug_open')))
+                    and (not modern or (centered and not p.get('deadman') and not p.get('motion_enabled')))):
                 self.handle('power', bool(p.get('power_enable')))
+                self.power_waiting=pair
+                return
 
-        active = (self.source == 'COCO' and p.get('mode') in ('A','B','C')
-                  and not p.get('menu_open') and not p.get('debug_open'))
-        centered = all(abs(p.get(k, 0)) <= 10 for k in (
-            'agv_filtered_x', 'agv_filtered_y',
-            'arm_filtered_x', 'arm_filtered_y'))
-
-        if active and not p.get('deadman'):
-            self.pad_released = True
+        mode=p.get('mode')
+        if self.source=='COCO' and previous and mode!=previous.get('mode'):
+            self.halt();self.coco_arm_z=self.coco_arm_grip=None
+        active = (self.source=='COCO' and mode in ('A','B','C','D')
+                  and not p.get('menu_open') and not p.get('debug_open')
+                  and not p.get('owner_pending') and not p.get('power_pending'))
+        if modern:
+            active=active and bool(self.robot and now-self.last_robot<=.5 and not self.capture
+                                   and self.telemetry.get('armed') and self.telemetry.get('protocol')==1
+                                   and self.telemetry.get('pwm_ok')!=0)
 
         if not active or not p.get('motion_enabled') or not p.get('deadman'):
             if self.source == 'COCO':
-                released = self.pad_released
                 self.halt()
-                self.pad_released = bool(active and not p.get('deadman') and released)
+                self.coco_arm_z=p.get('z_change_mm',0);self.coco_arm_grip=p.get('grip_change_pct',0)
+                if not isinstance(self.coco_arm_z,(int,float)):self.coco_arm_z=None
+                if not isinstance(self.coco_arm_grip,(int,float)):self.coco_arm_grip=None
+                self.pad_released = bool(active and not p.get('deadman') and (centered or not modern))
             return
 
         # The controller performs the centered DM edge handshake. Python still
@@ -647,10 +790,28 @@ class Engine(threading.Thread):
         if drive not in (-1, 0, 1) or steer not in (-1, 0, 1):
             self.halt()
             return
-        self.update_arm_from_coco(p,now)
+        if mode!='D':self.update_arm_from_coco(p,now)
+        if mode=='A':drive=steer=0
 
-        cap = (85, 110, 135)[int(p.get('speed_level', 0)) % 3]
-        self.primitive = None
+        cap=COCO_AGV_SPEED[coco_level(p.get('agv_speed_level'),coco_level(p.get('speed_level'),0))]
+        step=p.get('turn_step_deg',0) if modern and mode in ('B','D') else 0
+        if self.coco_turn_state=='RUN':
+            if step!=abs(self.coco_turn.value) or drive or not self.coco_imu_ready(now):self.halt()
+            return
+        if step in (45,90,180):
+            rotation=axes[1]
+            if not steer and isinstance(rotation,(int,float)) and abs(rotation)<=20:
+                self.coco_turn_ready=True
+            if steer:
+                self.set_live_drive(None,now)
+                if self.coco_turn_ready:
+                    self.coco_turn_ready=False
+                    self.coco_turn=None;self.coco_turn_state='NO IMU';self.coco_turn_progress=0.0
+                    if self.coco_imu_ready(now):
+                        self.coco_turn=ImuTurn(steer*step,self.odom,self.g,now,cap,self.min_pwm,precise=True)
+                        self.coco_turn_state='RUN';self.stopped=False
+                return
+        else:self.coco_turn_ready=False
         wheels=(-steer*cap,steer*cap) if steer else (drive*cap,drive*cap) if drive else None
         try:self.set_live_drive(wheels,now)
         except ValueError as exc:
@@ -759,7 +920,9 @@ class Engine(threading.Thread):
                         kind,value=self.routine.popleft();self.start_test(kind,value,self.routine_cap);self.routine_step+=1
                         self.emit(f'Paso {self.routine_step}/{self.routine_total}: {kind}' + (f' {value:g}' if isinstance(value,(int,float)) else ''))
                     # Advance timed pulses only when their PWM will be sent.
-                    if self.primitive and now-last_output>=0.05:
+                    if self.coco_turn_state=='RUN' and now-last_output>=.05:
+                        l,r=self.coco_turn_output(now)
+                    elif self.primitive and now-last_output>=0.05:
                         try:
                             l,r=self.primitive.output(self.odom,now)
                             if self.primitive.done:
@@ -837,15 +1000,14 @@ class Engine(threading.Thread):
                         self.robot.send(f'PWM:{out_l},{out_r}\n');self.sent_pwm=(out_l,out_r)
                     except OSError:self.halt(False);self.robot.close();self.robot=None
                 if self.pad and now-last_state>=0.1:
-                    fresh=bool(self.robot and now-self.last_robot<=0.5);last_state=now
+                    last_state=now
                     try:
-                        arm_xyz=self.arm_model.compute_fk(self.arm_angles)[0]
-                        self.pad.send(f"CTRL:{int(self.source=='COCO')}\nSTATE:{arm_xyz[0]:.1f},{arm_xyz[1]:.1f},{arm_xyz[2]:.1f},0,0,0,{self.odom.v:.2f},{int(fresh)},{int(fresh and self.telemetry.get('armed',0))},0\nAGV:{(self.odom.left+self.odom.right)/20:.2f},{math.degrees(self.odom.yaw):.2f},{self.odom.v:.2f},{self.telemetry.get('tl',0)},{self.telemetry.get('tr',0)},{int(self.telemetry.get('imu',0))}\nYAW:{self.odom.imu_yaw:.2f},{self.turn_delta:.2f},{self.odom.imu_yaw/360:.4f},{int(fresh and self.odom.imu_valid)}\n")
+                        self.pad.send(self.coco_state_frame(now))
                     except OSError:
                         if self.source=='COCO':self.halt_loss()
                         self.pad.close();self.pad=None
                 if now-getattr(self,'last_render',0)>0.1:
-                    self.last_render=now;self.signals.state.emit({'distance_calibration':self.distance_result,'distance_progress':({'side':self.distance_reference['side'],'left_cm':(self.odom.left-self.distance_reference['left'])/10,'right_cm':(self.odom.right-self.distance_reference['right'])/10} if self.distance_reference else None),'pose_revision':self.odom.revision,'imu_segment':self.odom.imu_segment,'single_left':self.odom.single_left,'single_right':self.odom.single_right,'host_monotonic':now,'sent_pwm':self.sent_pwm,'estop_latched':self.estop_latched,'age':now-self.last_robot if self.last_robot else 0,'vl':self.odom.vl,'vr':self.odom.vr,'routine_step':self.routine_step,'routine_total':self.routine_total,'telemetry':dict(self.telemetry),'fresh':bool(self.robot and now-self.last_robot<0.5),'pad_fresh':bool(self.pad and now-self.last_pad<0.5),'path':list(self.path),'x':self.odom.x,'y':self.odom.y,'yaw':math.degrees(self.odom.yaw),'imu_yaw':self.odom.imu_yaw,'speed':self.odom.v,'result':self.test_result,'pad':dict(self.pad_data),'enc_yaw':math.degrees(self.odom.enc_yaw),'imu_valid':self.odom.imu_valid,'imu_reason':self.odom.imu_reason,'yaw_source':self.odom.source,'robot_retry':bool(self.robot_host and self.robot is None),'pad_retry':bool(self.pad_host and self.pad is None),'geometry':asdict(self.g),'capture_active':self.capture is not None,'last_wheel_test':self.last_wheel_test,'turn_delta':self.turn_delta,'dl':self.odom.dl,'dr':self.odom.dr,'arm_angles':self.arm_angles.tolist(),'arm_gripper':self.arm_gripper,'arm_target_angles':self.arm_target_angles.tolist(),'arm_target_gripper':self.arm_target_gripper,'arm_busy':self.arm_busy,'arm_error':self.arm_error})
+                    self.last_render=now;self.signals.state.emit({'source':self.source,'distance_calibration':self.distance_result,'distance_progress':({'side':self.distance_reference['side'],'left_cm':(self.odom.left-self.distance_reference['left'])/10,'right_cm':(self.odom.right-self.distance_reference['right'])/10} if self.distance_reference else None),'pose_revision':self.odom.revision,'imu_segment':self.odom.imu_segment,'single_left':self.odom.single_left,'single_right':self.odom.single_right,'host_monotonic':now,'sent_pwm':self.sent_pwm,'estop_latched':self.estop_latched,'age':now-self.last_robot if self.last_robot else 0,'vl':self.odom.vl,'vr':self.odom.vr,'routine_step':self.routine_step,'routine_total':self.routine_total,'telemetry':dict(self.telemetry),'fresh':bool(self.robot and now-self.last_robot<0.5),'pad_fresh':bool(self.pad and now-self.last_pad<0.5),'path':list(self.path),'x':self.odom.x,'y':self.odom.y,'yaw':math.degrees(self.odom.yaw),'imu_yaw':self.odom.imu_yaw,'speed':self.odom.v,'result':self.test_result,'pad':dict(self.pad_data),'enc_yaw':math.degrees(self.odom.enc_yaw),'imu_valid':self.odom.imu_valid,'imu_reason':self.odom.imu_reason,'yaw_source':self.odom.source,'robot_retry':bool(self.robot_host and self.robot is None),'pad_retry':bool(self.pad_host and self.pad is None),'geometry':asdict(self.g),'capture_active':self.capture is not None,'last_wheel_test':self.last_wheel_test,'turn_delta':self.turn_delta,'dl':self.odom.dl,'dr':self.odom.dr,'arm_angles':self.arm_angles.tolist(),'arm_gripper':self.arm_gripper,'arm_target_angles':self.arm_target_angles.tolist(),'arm_target_gripper':self.arm_target_gripper,'arm_busy':self.arm_busy,'arm_error':self.arm_error})
             except Exception as e:self.halt(False);self.emit('Stopped: '+str(e))
             time.sleep(0.005)
         self.halt(True)
@@ -1316,6 +1478,12 @@ class Window(QtWidgets.QMainWindow):
         elif calibration:
             self.distance_feedback.setText(f"Saved {calibration['side']}: indicated {calibration['indicated_cm']:.2f} cm / actual {calibration['measured_cm']:.2f} cm · factor {calibration['ratio']:.4f}")
         if hasattr(self,'arm_workspace'):self.arm_workspace.receive_state(s)
+        owner=s.get('source',self.source.currentText())
+        if owner!=self.source.currentText():
+            self.holding=False
+            blocker=QtCore.QSignalBlocker(self.source)
+            self.source.setCurrentText(owner)
+            del blocker
         t=s['telemetry'];g=s['geometry'];fresh=s['fresh'];heading=t.get('heading',0)
         sent=s.get('sent_pwm',(0,0))
         actual=f"{t.get('pl',0)}, {t.get('pr',0)}" if fresh else 'unknown (offline)'
