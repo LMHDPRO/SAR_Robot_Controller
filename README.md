@@ -5,6 +5,7 @@ Integración de **SAR 1.5 + RobotArmCodeV7(2).py**. Aplicación local Python/PyS
 ## Qué está integrado
 
 - **AGV:** conducción, odometría, calibraciones de ruedas/distancia, giros por IMU, rutinas y exportación CSV de la versión 1.5.
+- **Programa por bloques:** combinar avance con encoder/IMU, giro preciso, espera, pose por servos, pose XYZ mediante IK y alineación ArUco 12. Los bloques se ejecutan en orden; el brazo espera confirmación PWM estimada y STOP cancela el programa. Guardar/cargar conserva la compatibilidad con rutinas anteriores. XYZ usa el modelo del brazo, sin detección de colisiones ni medición articular; se requiere verificar cada trayectoria física.
 - **Arm V7:** separate 3D preview, FK/IK controls, gripper, speed, A/B points, obstacles and manual path planning. The Camera tab is preview-only; it cannot start autonomous search or grasping. ArUco detection remains in Cameras IP.
 - **Control global:** IP del AGV y COCO, propietario PC/COCO, alimentación, STOP, E-STOP, desbloqueo, reset de odometría y estados I2C/PWM/telemetría visibles en todas las pestañas.
 - **Dos cámaras ESP32-S3 IP:** conexiones independientes, preview MJPEG/RTSP según firmware de cámara, detección ArUco y distancia en coordenadas de cada cámara si está calibrada. Captura en procesos separados, sin bloquear el hilo de interfaz si la conexión falla.
@@ -126,6 +127,7 @@ V7 permitía 90° de apertura automática; el adaptador usa 75° para respetar l
 - **C · TCP:** queda temporalmente igual que B y reutiliza el IK CCD actual; no es aún un controlador TCP independiente.
 - El OLED de COCO muestra la XYZ estimada actual del brazo y el estado de conducción; el detalle de AGV sigue en la pantalla Debug / AGV INFO. Son estimaciones PWM/FK, no mediciones con encoders articulares.
 - Los tres modos requieren COCO como propietario, AGV listo, deadman y joystick centrado antes de habilitar movimiento. La casilla global **Live Robot Arm movement** conserva el control continuo entre pestañas; al desactivarla deja de enviar poses. **Enviar pose (prueba)** en el panel Brazo manda una pose puntual y queda deshabilitada durante Live. Al cambiar de pestaña, el STOP global sigue actuando cuando Live está apagado.
+- Al avanzar o retroceder con COCO o con los botones de PC, el rumbo del IMU se fija al comenzar y el control corrige la diferencia de ruedas. Al soltar, invertir o girar se libera esa referencia. Si falta el IMU o se pierde su continuidad, se detiene el avance y COCO requiere liberar el deadman antes de volver a habilitarlo. Los giros manuales siguen siendo libres. En las rutinas, los desplazamientos usan el encoder seleccionado en **Drive** y el IMU; los giros usan el modo preciso. Las rutas guardadas con los nombres anteriores se interpretan con esos modos.
 
 Bibliotecas Arduino: WiFi/Wire/Preferences incluidas en ESP32; Adafruit BNO055, Unified Sensor, GFX, SSD1306, PWM Servo Driver y sus dependencias. El constructor correcto es `Adafruit_PWMServoDriver pca(PCA_ADDR, Wire);`. Usar la placa/PSRAM/flash correspondientes a cada módulo. El firmware conserva la API ESP32 Arduino 3.x del proyecto original; no se compiló aquí con tu placa.
 

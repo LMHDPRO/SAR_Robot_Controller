@@ -1,5 +1,20 @@
 # Wireless LiDAR and local SLAM
 
+## Uso rápido para la pista SAR
+
+- En **LiDAR / SLAM**, conecta la IP configurada y pulsa **Iniciar escaneo 360°**. La configuración del proyecto usa X = +0.115 m, Y = 0 y sector excluido = 0°, con predicción mediante encoder izquierdo + IMU. Verifica físicamente el giro de montaje y cambia el encoder en **Configuración avanzada** si utilizas el derecho. Cambiar una calibración exige **Nuevo mapa**.
+- Las cuatro cifras son medianas de retornos dentro de sectores angulares, medidas respecto al centro del AGV. Son orientativas y no representan el hueco libre ni garantizan ausencia de obstáculos; «sin datos» no significa libre.
+- Con el AGV detenido y al menos dos escaneos aceptados, **Guardar posición actual** conserva una pose en el mapa local. Se muestran desplazamientos y giro estimados para volver a ese punto, sin mover el robot. El punto se pierde al crear otro mapa, reiniciar odometría o cerrar la aplicación. Si se pierde localización, no se muestra una posición válida.
+- El HTML de la pista describe paredes y bloques de 150 mm de alto, un paso de 400 mm y otro de 450 mm. Confirma que el plano del LiDAR atraviese las paredes; el sensor 2D no ve obstáculos fuera de su plano ni puede verificar la altura libre de la puerta. El chasis, el brazo, los cables y el error de medición necesitan margen adicional.
+- Los datos de LiDAR, el montaje, el sentido angular, el IMU y los encoders deben validarse con medidas reales antes de utilizar el mapa como ayuda para maniobrar. No hay retorno automático a la pose guardada ni control de colisiones.
+
+## Medir la zona tapada por el robot
+
+1. Con el AGV detenido, abre **Ver escaneo para medir ángulos**. El gráfico usa coordenadas del AGV: X positivo hacia delante y Y positivo hacia la izquierda. La cruz marca el LiDAR; los puntos verdes se usan en el mapa y los naranjas son retornos excluidos por el chasis o la máscara aplicada.
+2. Mueve el cursor sobre el gráfico para leer el ángulo respecto al LiDAR: 0° delante, +90° izquierda, −90° derecha y ±180° atrás. Para calibrar el giro, deja el AGV detenido, coloca un objeto exactamente delante del LiDAR y abre **Asistente de calibración**. Haz clic sobre el objeto en la captura, revisa la vista previa, confirma que nada se movió y pulsa **Aplicar y crear mapa nuevo**. La vista coloca el frente hacia la izquierda de la pantalla sin cambiar la convención de coordenadas. Verifica después con objetos delante y a ambos lados.
+3. Para identificar la obstrucción, mueve manualmente un objeto visible alrededor del sensor con el AGV inmóvil y anota dónde desaparecen o vuelven sus retornos. Un sector sin retorno no demuestra por sí mismo que esté obstruido o libre. La máscara angular del asistente empieza en 0° para evitar asumir el ancho; cuando lo hayas medido, introduce el ancho trasero en el asistente o ajusta centro y ancho en configuración avanzada y pulsa **Nuevo mapa / aplicar ajustes**. Las direcciones excluidas quedan desconocidas, no libres; ajustar la máscara elimina el mapa y el punto guardado anteriores.
+4. La máscara angular no sustituye la predicción del movimiento: el mapa puede seguir usando encoder e IMU si está seleccionada esa opción y hay telemetría válida. Comprueba que la caja de chasis y su margen representen el robot real.
+
 ## Architecture
 
 The PC connects directly to the external COIN-D6 bridge using its own TCP socket (initial port 9000). LiDAR bytes NEVER travel through the AGV controller. The AGV keeps its existing TCP 4211 connection for commands and telemetry. Acquisition and scan matching use separate workers and a bounded latest-scan handoff. Combining already-received AGV telemetry with LiDAR happens on the PC; this does not add AGV network requests. Shared Wi-Fi airtime and PC CPU are still finite resources.
@@ -19,6 +34,8 @@ USB/serial support has been removed from the LiDAR module. BIN replay remains av
 Single-encoder predictions are computed from calibrated wheel travel and IMU increments at telemetry rate. Motor polarity and channel swapping are undone before classifying opposite wheel directions. When motor telemetry reports an in-place rotation, the predicted centre holds X/Y and updates only yaw from the IMU, ignoring encoder travel. This mode remains active during zero-PWM settling until a new nonzero translation command is observed. During translation, the wheel-to-centre correction accounts for small heading changes. Rotation direction is never inferred from the faulty encoder.
 
 This is an explicit in-place-motion assumption, not a measurement that the chassis did not slip. Moving the chassis by hand after a rotation is not supported by this motor-based classification. ICP may still correct the pose if measured surfaces disagree with the prediction. The original AGV two-wheel odometry display is unchanged; the selected single-encoder prediction applies to SLAM and the dedicated calibration run.
+
+For a scan covered by continuous opposite-wheel motor telemetry and a valid single-encoder/IMU prediction, scan matching keeps the predicted axle-centre position during rotation. If the scan demands more than 3 cm of translation, the scan is rejected rather than added to the map. This assumes an approximately in-place spin; slip and unsynchronized scan motion remain possible. If the whole scan is not covered by spin telemetry, normal matching is used.
 
 The LiDAR itself moves along an arc when the centre rotates because it is 11.5 cm ahead of that centre. Transforming its points into the robot frame before scan matching accounts for this offset.
 

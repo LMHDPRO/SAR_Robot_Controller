@@ -35,7 +35,7 @@ class DifferentialTests(unittest.TestCase):
   p=ImuTurn(90,self.o,self.g,2);self.o.imu_valid=False
   with self.assertRaises(RuntimeError):p.output(self.o,2.1)
  def test_manual90_neutral_and_release(self):
-  e=Engine();e.source='COCO';p=dict(type='coco',control_style='manual90',boot_id=1,seq=0,mode='B',deadman=0,motion_enabled=0,drive=0,steer=0)
+  e=Engine();e.source='COCO';e.odom.imu_valid=True;p=dict(type='coco',control_style='manual90',boot_id=1,seq=0,mode='B',deadman=0,motion_enabled=0,drive=0,steer=0)
   def send(**v):p.update(v);p['seq']+=1;e.process_pad(dict(p),time.monotonic())
   send();send(deadman=1,motion_enabled=1);send(drive=1);self.assertEqual(e.live,(85,85));send(drive=0);self.assertIsNone(e.live);send(steer=-1);self.assertEqual(e.live,(85,-85));send(deadman=0);self.assertIsNone(e.live)
  def test_motor_polarity_and_channel_swap(self):
@@ -69,13 +69,22 @@ class PreciseImuTests(unittest.TestCase):
  def test_unstable_heading_stops_with_bounded_wait(self):
   o,p=self.make_turn()
   with self.assertRaisesRegex(RuntimeError,'could not settle'):
-   for n in range(1,180):
+   for n in range(1,280):
     o.imu_yaw=180+(1.5 if n%2 else -1.5);o.imu_rate=60 if n%2 else -60
     p.output(o,n*.05)
  def test_drift_during_settling_resumes_correction(self):
   o,p=self.make_turn();o.imu_yaw=180;p.output(o,.5)
   o.imu_yaw=185;l,r=p.output(o,1)
   self.assertFalse(p.done);self.assertGreater(l,0);self.assertLess(r,0)
+ def test_stopping_and_settling_do_not_count_as_missing_rotation_progress(self):
+  o,p=self.make_turn(10);p.output(o,0)
+  o.imu_yaw=9;o.imu_rate=0
+  for now in (1.,1.5,2.,2.5,3.):
+   p.output(o,now)
+  self.assertTrue(p.done)
+ def test_brakes_early_for_measured_angular_momentum(self):
+  o,p=self.make_turn(90);o.imu_yaw=80;o.imu_rate=45
+  self.assertEqual(p.output(o,1),(0,0))
  def test_imu_loss_and_discontinuity_cancel(self):
   for field,value in [('imu_valid',False),('imu_segment',1)]:
    o,p=self.make_turn();setattr(o,field,value)
@@ -220,7 +229,7 @@ class GuiTests(unittest.TestCase):
     w.drive((1,1));pump(.2);self.assertGreater(robot.pwm[0],0)
     w.stop();pump(.1)
     w.test('turn',90);pump(.2)
-    self.assertIsNotNone(w.engine.primitive);self.assertFalse(w.engine.primitive.precise)
+    self.assertIsNotNone(w.engine.primitive);self.assertTrue(w.engine.primitive.precise)
     self.assertLess(robot.pwm[0],0);self.assertGreater(robot.pwm[1],0)
     stop.click();pump(.15);self.assertEqual(robot.pwm,(0,0))
    finally:w.close();app.processEvents();robot.quit=True;robot.join(2)
@@ -245,7 +254,7 @@ class Version04Tests(unittest.TestCase):
   class Sink:
    def __init__(self):self.commands=[]
    def send(self,s):self.commands.append(s)
-  e=Engine();e.robot=Sink();e.telemetry={'armed':1,'protocol':1};e.last_robot=time.monotonic()
+  e=Engine();e.robot=Sink();e.telemetry={'armed':1,'protocol':1};e.last_robot=time.monotonic();e.odom.imu_valid=True
   e.handle('routine',([('distance',20),('turn',90)],85));self.assertEqual(len(e.routine),1)
   e.halt();self.assertFalse(e.routine);self.assertIsNone(e.primitive);self.assertEqual(e.robot.commands[-1],'STOP\n')
   e.handle('stop',True);self.assertEqual(e.robot.commands[-1],'POWER:0\n')
@@ -276,14 +285,14 @@ class Version04Tests(unittest.TestCase):
     ms+=100;l-=10;r+=10;h+=10;o.update(frame(ms,l,r,h%360),g)
   self.assertAlmostEqual(o.x,0,places=6);self.assertAlmostEqual(o.y,0,places=6)
  def test_routine_sequence_over_tcp(self):
-  robot=FakeRobot();robot.start();e=Engine();e.runtime['cut_relays_on_loss']=False;e.start()
+  robot=FakeRobot();robot.start();e=Engine();messages=[];e.emit=messages.append;e.runtime['cut_relays_on_loss']=False;e.start()
   def pump(sec):
    end=time.monotonic()+sec
    while time.monotonic()<end:e.post('heartbeat');time.sleep(.02)
   try:
    e.post('connect_robot','127.0.0.1');pump(.3);e.post('power',True);pump(.2)
-   e.post('routine',([('distance',2),('distance',-2)],50));pump(3)
-   self.assertIsNone(e.primitive);self.assertFalse(e.routine);self.assertEqual(e.routine_step,2)
+   e.post('routine',([('distance',2),('distance',-2)],50));pump(6)
+   self.assertIsNone(e.primitive,str(messages));self.assertFalse(e.routine,str(messages));self.assertEqual(e.routine_step,2,str(messages))
    self.assertTrue(any(s.startswith('PWM:-') for s in robot.commands));self.assertEqual(robot.armed,1)
   finally:e.quit=True;e.join(2);robot.quit=True;robot.join(2)
 

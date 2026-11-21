@@ -149,6 +149,27 @@ class Primitive:
             return math.copysign(min(self.cap,max(self.min_pwm,abs(errors[i])*1.2)),errors[i])
         return output(0),output(1)
 
+class HeadingHold:
+    """Keep the IMU heading while a forward or reverse command is held."""
+    def __init__(self, odom, now):
+        if not odom.imu_valid:raise ValueError('No fresh BNO055 heading; straight drive blocked')
+        self.target=odom.imu_yaw;self.segment=odom.imu_segment
+        self.last=now;self.integral=0.;self.filtered_rate=0.
+    def output(self,odom,now,command):
+        if not odom.imu_valid or odom.imu_segment!=self.segment:
+            raise RuntimeError('IMU continuity lost: straight drive stopped; release and try again')
+        cap=abs(float(command));dt=max(0.,min(now-self.last,.2));self.last=now
+        alpha=dt/(.15+dt) if dt else 0.
+        self.filtered_rate+=alpha*(odom.imu_rate-self.filtered_rate)
+        error=self.target-odom.imu_yaw
+        limit=min(45.,cap*.45)
+        candidate=max(-20.,min(20.,self.integral+error*dt))
+        proposed=2.0*error+.05*candidate-.5*self.filtered_rate
+        if abs(proposed)<=limit or proposed*error<0:self.integral=candidate
+        correction=max(-limit,min(limit,2.0*error+.05*self.integral-.5*self.filtered_rate))
+        return (max(-cap,min(cap,command-correction)),max(-cap,min(cap,command+correction)))
+
+
 class SingleEncoderMove:
     # Conservative starting gains; tune on the chassis with the wheels lifted.
     kind='distance_imu'
@@ -159,13 +180,13 @@ class SingleEncoderMove:
         if side not in ('left','right'):raise ValueError('Choose the left or right encoder')
         if not 0<abs(value)<=200:raise ValueError('Distance must be nonzero, within +/-200 cm')
         if not odom.imu_valid:raise ValueError('No fresh BNO055 heading; see IMU status')
-        self.side=side;self.index=0 if side=='left' else 1
+        self.side=side;self.value=value;self.index=0 if side=='left' else 1
         self.wheel_origin=(odom.left,odom.right)[self.index]
         self.target=self.wheel_origin+value*10;self.direction=1 if value>0 else -1
         self.heading_target=odom.imu_yaw;self.segment=odom.imu_segment
         self.origin=(odom.x,odom.y,odom.yaw,odom.imu_yaw,(odom.left+odom.right)/2)
         self.start=now;self.progress_at=now;self.progress=self.wheel_origin
-        self.last_output_at=now;self.integral=0.0;self.cap=max(1,min(int(cap),180))
+        self.last_output_at=now;self.integral=0.0;self.filtered_rate=0.0;self.cap=max(1,min(int(cap),180))
         self.min_pwm=min(self.cap,max(1,int(min_pwm)));self.done=False;self.settle_at=None
     def distance_cm(self,odom):
         position=(odom.left,odom.right)[self.index]
@@ -190,11 +211,18 @@ class SingleEncoderMove:
         self.settle_at=None
         dt=max(0.0,min(now-self.last_output_at,.2))
         self.last_output_at=now
-        self.integral=max(-20.0,min(20.0,self.integral+(self.heading_target-odom.imu_yaw)*dt))
         heading_error=self.heading_target-odom.imu_yaw
-        correction=self.kp*heading_error+self.ki*self.integral-self.kd*odom.imu_rate
+        # Filter IMU rate noise before the derivative term and stop integrating
+        # when the requested correction already exceeds its available range.
+        alpha=dt/(.15+dt) if dt>0 else 0.0
+        self.filtered_rate+=alpha*(odom.imu_rate-self.filtered_rate)
         base=min(self.cap,max(self.min_pwm,abs(error)*1.2))
-        correction=max(-min(45.0,base),min(min(45.0,base),correction))
+        limit=min(45.0,base)
+        candidate=max(-20.0,min(20.0,self.integral+heading_error*dt))
+        proposed=self.kp*heading_error+self.ki*candidate-self.kd*self.filtered_rate
+        if abs(proposed)<=limit or proposed*heading_error<0:self.integral=candidate
+        correction=self.kp*heading_error+self.ki*self.integral-self.kd*self.filtered_rate
+        correction=max(-limit,min(limit,correction))
         # Positive correction commands a left turn (right wheel faster).
         left=self.direction*base-correction;right=self.direction*base+correction
         return max(-self.cap,min(self.cap,left)),max(-self.cap,min(self.cap,right))
@@ -246,26 +274,28 @@ class ImuTurn:
             self.done=now-self.good_at>=.35
         else:self.good_at=None
         if self.done:return 0,0
-        if abs(error)<=12 and self.fine_started is None:self.fine_started=now
-        if self.fine_started is not None and now-self.fine_started>8:
+        if abs(error)<=18 and self.fine_started is None:self.fine_started=now
+        if self.fine_started is not None and now-self.fine_started>12:
             raise RuntimeError('Precise IMU could not settle: stopped. Check PWM / IMU; retry or use standard ROTATE.')
         change=odom.imu_yaw-self.origin[3]
         if change*self.value<0 and abs(change)>8:
             raise RuntimeError('Turn / IMU sign inconsistent: verify polarity')
         if self.pulse_until is not None:
             if now>=self.pulse_until or abs(error)<=2 or error*self.pulse_direction<=0:
-                self.pulse_until=None;self.coast_until=now+.35
-        if now<self.coast_until or abs(error)<=2:return 0,0
+                self.pulse_until=None;self.coast_until=now+.5
+        if now<self.coast_until or abs(error)<=2:
+            self.progress_at=now
+            return 0,0
         if now-self.progress_at>2:raise RuntimeError('No IMU rotation progress')
         # Stop ahead of the target using measured angular speed, then remeasure.
-        if error*rate>0 and abs(error)<=abs(rate)*.18:
-            self.pulse_until=None;self.coast_until=now+.35
+        if error*rate>0 and abs(error)<=abs(rate)*.25:
+            self.pulse_until=None;self.coast_until=now+.5;self.progress_at=now
             return 0,0
-        if abs(error)<=12 and self.pulse_until is None:
+        if abs(error)<=18 and self.pulse_until is None:
             # Firmware ramps by 6 PWM / 10 ms; allow it to reach breakaway
             # PWM before ending the pulse. A 50 ms pulse can never reach 80.
             ramp_time=math.ceil(self.min_pwm/6)*.01
-            self.pulse_until=now+ramp_time+.05;self.pulse_direction=1 if error>0 else -1
+            self.pulse_until=now+ramp_time+.01;self.pulse_direction=1 if error>0 else -1
         pwm=math.copysign(min(self.cap,max(self.min_pwm,abs(error)*1.2)),error)
         return -pwm,pwm
 
@@ -277,6 +307,22 @@ def validate_routine(steps):
     for step in steps:
         if not isinstance(step,(list,tuple)) or len(step)!=2:raise ValueError('Each step must be [action, value]')
         kind,value=step
+        if kind in ('arm','arm_xyz'):
+            if not isinstance(value,dict):raise ValueError('El bloque de brazo requiere parámetros')
+            key='joints' if kind=='arm' else 'xyz';values=value.get(key)
+            size=4 if kind=='arm' else 3
+            if not isinstance(values,(list,tuple)) or len(values)!=size or any(isinstance(x,bool) or not isinstance(x,(int,float)) or not math.isfinite(x) for x in values):
+                raise ValueError('Coordenadas o ángulos del brazo inválidos')
+            if kind=='arm' and any(not 0<=x<=180 for x in values):raise ValueError('Ángulos del brazo fuera de 0–180°')
+            grip=value.get('gripper');rotation=value.get('rotation');duration=value.get('duration_ms')
+            if any(isinstance(x,bool) or not isinstance(x,(int,float)) or not math.isfinite(x) for x in (grip,rotation,duration)):
+                raise ValueError('Pinza, rotación o duración inválidas')
+            if not 10<=grip<=75 or not 0<=rotation<=180 or not 100<=duration<=10000 or int(duration)!=duration:
+                raise ValueError('Pinza, rotación o duración fuera de rango')
+            result.append((kind,{key:list(values),'gripper':grip,'rotation':rotation,'duration_ms':int(duration)}));continue
+        if kind=='aruco':
+            if value is not None:raise ValueError('El bloque ArUco no requiere parámetros')
+            result.append((kind,None));continue
         if kind not in ('distance','turn','imu_precise','wait'):raise ValueError('Actions: distance (cm), turn / imu_precise (degrees), wait (s)')
         if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value):raise ValueError('Finite numeric value required')
         if kind=='wait' and not 0<value<=60:raise ValueError('Wait must be 0–60 seconds, nonzero')

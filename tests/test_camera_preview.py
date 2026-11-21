@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 import cv2
 import numpy as np
-from PySide6 import QtWidgets
-from app import Engine
+from PySide6 import QtGui, QtWidgets
+from app import Engine, Window
 from arm_workspace import ArmWorkspace
 from camera_worker import rotate_preview, run as run_camera_worker
 from cameras import CameraPanel
@@ -20,6 +20,23 @@ APP=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 class CameraPreviewTests(unittest.TestCase):
+    def test_routine_preview_reuses_camera_frame_and_clears_on_stop(self):
+        with patch('cameras.CamerasPage.save'):
+            window=Window()
+            try:
+                panel=window.cameras.panels[0]
+                self.assertEqual(len(window.cameras.panels),1)
+                self.assertGreaterEqual(window.workspaces.indexOf(window.routine_scroll),0)
+                self.assertEqual(window.tabs.indexOf(window.routine_scroll),-1)
+                panel.preview_frame.emit(QtGui.QImage(400,200,QtGui.QImage.Format.Format_RGB32))
+                pixmap=window.routine_camera_preview.pixmap()
+                self.assertFalse(pixmap.isNull())
+                self.assertEqual((pixmap.width(),pixmap.height()),(200,100))
+                panel.stop()
+                self.assertEqual(window.routine_camera_preview.text(),'Cámara AGV sin imagen')
+            finally:
+                window.close()
+                APP.processEvents()
     def test_reference_size_change_rescales_without_accepting_other_changes(self):
         saved={'url':'camera','dictionary':'DICT_6X6_250','marker_mm':35.,'calibration_sha256':'abc'}
         ref={'identity':saved,'xyz_camera_mm':[35.,70.,175.]}

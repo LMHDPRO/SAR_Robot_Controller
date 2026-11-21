@@ -82,6 +82,7 @@ class CalibrationDialog(QtWidgets.QDialog):
 
 class CameraPanel(QtWidgets.QGroupBox):
     calibration_saved = QtCore.Signal()
+    preview_frame = QtCore.Signal(object)
     marker_sample = QtCore.Signal(object)
     alignment_requested = QtCore.Signal(object)
     sequence_requested = QtCore.Signal(object)
@@ -93,7 +94,7 @@ class CameraPanel(QtWidgets.QGroupBox):
         super().__init__(title,parent)
         self.proc=QtCore.QProcess(self);self.buffer=b'';self.last_frame=0;self.last_activity=0;self.stopping=False
         self.arm_camera_api=arm_camera_api;self.received_frame=False;self.restart_on_finish=False
-        self.marker_readings=[];self.active_config=None
+        self.marker_readings=[];self.active_config=None;self.active_identity=None
         self.reference_path=Path(__file__).with_name('aruco_agv_reference.json')
         self.proc.readyReadStandardOutput.connect(self.read_output)
         self.proc.readyReadStandardError.connect(lambda:self.proc.readAllStandardError())
@@ -195,6 +196,13 @@ class CameraPanel(QtWidgets.QGroupBox):
         self.request_alignment(sequence=True)
     def continue_alignment(self):
         self.request_alignment(sequence=False)
+    def get_alignment_reference(self):
+        ref=json.loads(self.reference_path.read_text(encoding='utf8'))
+        ref,_=self.adapt_reference_size(ref,self.reference_identity())
+        if self.proc.state()==QtCore.QProcess.ProcessState.NotRunning:raise ValueError('Conecta primero la cámara AGV.')
+        if (self.marker_readings and time.monotonic()-self.marker_readings[-1]['captured_at']<=.5
+                and ref['image_size']!=self.marker_readings[-1]['image_size']):raise ValueError('Cambió la resolución; guarda otra referencia.')
+        return ref
     def request_alignment(self,sequence):
         try:
             ref=json.loads(self.reference_path.read_text(encoding='utf8'))
@@ -228,13 +236,17 @@ class CameraPanel(QtWidgets.QGroupBox):
             QtWidgets.QMessageBox.information(self, 'Calibración guardada', f'Calibración guardada. Error de reproyección RMS: {dialog.rms:.2f} px. Verifica las distancias con una regla.')
     def start(self):
         if self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning:return
+        self.preview_frame.emit(None)
         self.stopping=False;self.restart_on_finish=False;self.buffer=b'';self.last_frame=time.monotonic();self.last_activity=self.last_frame
         self.received_frame=False
         self.status.setText('Conectando…');self.connect_button.setEnabled(False)
         self.active_config=self.config();self.marker_readings=[];self.marker_sample.emit(None)
+        try:self.active_identity=self.reference_identity()
+        except (OSError,ValueError):self.active_identity=None
         self.proc.start(sys.executable,['-u',str(Path(__file__).with_name('camera_worker.py')),json.dumps(self.active_config)])
     def stop(self):
         self.marker_readings=[];self.marker_sample.emit(None)
+        self.preview_frame.emit(None)
         self.distance_label.setText('Distancia aproximada: sin conexión')
         self.stopping=True;self.table.setRowCount(0);self.preview.clear();self.preview.setText('Sin imagen · detenida')
         self.proc.terminate();QtCore.QTimer.singleShot(500,self.kill_if_stopping)
@@ -243,6 +255,7 @@ class CameraPanel(QtWidgets.QGroupBox):
         if self.stopping and self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning:self.proc.kill()
     def finished(self,*_):
         self.marker_readings=[];self.marker_sample.emit(None)
+        self.preview_frame.emit(None)
         self.distance_label.setText('Distancia aproximada: sin conexión')
         restart=self.restart_on_finish and not self.stopping
         self.restart_on_finish=False
@@ -257,6 +270,7 @@ class CameraPanel(QtWidgets.QGroupBox):
     def check_age(self):
         timeout=30
         if self.proc.state()!=QtCore.QProcess.ProcessState.NotRunning and time.monotonic()-self.last_activity>timeout:
+            self.preview_frame.emit(None)
             self.table.setRowCount(0);self.preview.clear();self.preview.setText('Sin imagen reciente')
             self.status.setText(f'Sin actividad de cámara durante {timeout} s; cerrando el worker')
             self.restart_on_finish=True
@@ -271,10 +285,13 @@ class CameraPanel(QtWidgets.QGroupBox):
         try:
             packet=json.loads(lines[-1])
             self.last_activity=time.monotonic()
-            if 'error' in packet:self.status.setText(packet['error']);return
-            if 'status' in packet:self.status.setText(packet['status']);return
+            if 'error' in packet:self.preview_frame.emit(None);self.status.setText(packet['error']);return
+            if 'status' in packet:
+                if 'desconectada' in packet['status'].lower() or 'reintento' in packet['status'].lower():self.preview_frame.emit(None)
+                self.status.setText(packet['status']);return
             image=QtGui.QImage.fromData(base64.b64decode(packet['jpeg']))
             if image.isNull():return
+            self.preview_frame.emit(image)
             self.last_frame=time.monotonic()
             self.received_frame=True
             pixmap=QtGui.QPixmap.fromImage(image)
@@ -286,7 +303,7 @@ class CameraPanel(QtWidgets.QGroupBox):
             valid=[r for r in rows if r.get('id')==12 and 'xyz_camera_mm' in r and 'rvec' in r]
             sample=None
             if len(valid)==1 and 'captured_at' in packet and 'image_size' in packet:
-                sample=dict(valid[0],captured_at=packet['captured_at'],image_size=packet['image_size'])
+                sample=dict(valid[0],captured_at=packet['captured_at'],image_size=packet['image_size'],identity=self.active_identity)
                 self.marker_readings=(self.marker_readings+[sample])[-10:]
             # One missed frame must not erase a recent valid pose. Explicit
             # disconnects still clear it, and the controller checks its age.
@@ -302,7 +319,7 @@ class CameraPanel(QtWidgets.QGroupBox):
             self.status.setText(f'ONLINE · {len(rows)} marcadores · '+('calibrada' if packet['metric'] else 'sin calibración: solo IDs/píxeles')+distance_info+(' · '+errors[0] if errors else ''))
         except (ValueError,KeyError,TypeError):self.status.setText('Frame inválido')
     def shutdown(self):
-        self.stopping=True;self.watchdog.stop();self.proc.kill();self.proc.waitForFinished(1000)
+        self.preview_frame.emit(None);self.stopping=True;self.watchdog.stop();self.proc.kill();self.proc.waitForFinished(1000)
 
 
 class CamerasPage(QtWidgets.QWidget):

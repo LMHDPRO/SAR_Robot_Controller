@@ -2,7 +2,7 @@ import math
 import unittest
 import numpy as np
 from coind6.protocol import Point
-from lidar_filters import filter_scan
+from lidar_filters import filter_scan, partition_scan
 from core import Geometry, Odometry, single_encoder_pose
 
 
@@ -28,6 +28,13 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(len(filter_scan(p,(.115,0,0,.05,12),sector_width=360)[0]),0)
         p=[Point(0,100,100,False)]
         self.assertEqual(len(filter_scan(p,(0,0,0,.05,12),body_margin=0)[0]),0)
+
+    def test_front_and_sides_remain_when_rear_sector_is_excluded(self):
+        points=[Point(a,1000,100,False) for a in (0,90,180,270)]
+        used,excluded=partition_scan(points,(.115,0,0,.05,12),sector_center=180,sector_width=120)
+        self.assertEqual((len(used),len(excluded)),(3,1))
+        np.testing.assert_allclose(excluded,[[-.885,0]],atol=1e-10)
+        np.testing.assert_allclose(used[:,0],[1.115,.115,.115],atol=1e-10)
 
 
 class SingleEncoderPoseTests(unittest.TestCase):

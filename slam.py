@@ -44,17 +44,26 @@ class LocalSLAM:
         self.odom = None
         self.last_time = None
 
-    def update(self, points, timestamp, odom=None):
+    def update(self, points, timestamp, odom=None, rotation_only=False):
         points = np.asarray(points, dtype=float).reshape(-1, 2)
         points = voxel(points[np.all(np.isfinite(points), axis=1)], .04, 10000)
         points = points[::max(1, math.ceil(len(points)/600))]
         if len(points) < 40:
             return self.result(False, 'Too few valid points', points)
-        if self.last_time is not None and timestamp - self.last_time > 1.0:
-            return self.result(False, 'Localization lost after gap: start a new map', points)
+        recovering=self.last_time is not None and timestamp-self.last_time>1.0
+        if recovering:
+            gap=timestamp-self.last_time
+            if odom is None or self.odom is None:
+                return self.result(False, 'Localización perdida: falta odometría para recuperar el mapa', points)
+            delta=np.asarray(odom)-self.odom
+            if np.linalg.norm(delta[:2])>.5:
+                return self.result(False, 'Localización perdida: desplazamiento demasiado grande para recuperar el mapa', points)
         prediction = self.pose.copy()
         if odom is not None and self.odom is not None:
             prediction = relative_prediction(self.pose, self.odom, np.asarray(odom))
+        else:rotation_only=False
+        odom_prediction=prediction.copy()
+        anchored_xy=prediction[:2].copy()
         if len(self.map):
             target = self.map[np.linalg.norm(self.map - prediction[:2], axis=1) < 13]
             if len(target) < 40:
@@ -73,13 +82,20 @@ class LocalSLAM:
                 u, singular, vt = np.linalg.svd((a-ac).T @ (b-bc))
                 if singular[-1] < singular[0] * .005:
                     return self.result(False, 'Degenerate geometry (wall/line)', points)
-                r = vt.T @ u.T
-                if np.linalg.det(r) < 0:
-                    vt[-1] *= -1
+                if rotation_only:
+                    # Fit the rotation around the predicted axle centre directly;
+                    # unconstrained ICP translation is unreliable in a partial scan.
+                    aa=a-anchored_xy;bb=b-anchored_xy
+                    angle=math.atan2(np.sum(aa[:,0]*bb[:,1]-aa[:,1]*bb[:,0]),np.sum(aa*bb))
+                    shift=np.zeros(2)
+                else:
                     r = vt.T @ u.T
-                shift = bc - r @ ac
-                angle = math.atan2(r[1, 0], r[0, 0])
-                prediction[:2] = r @ prediction[:2] + shift
+                    if np.linalg.det(r) < 0:
+                        vt[-1] *= -1
+                        r = vt.T @ u.T
+                    shift = bc - r @ ac
+                    angle = math.atan2(r[1, 0], r[0, 0])
+                    prediction[:2] = r @ prediction[:2] + shift
                 prediction[2] += angle
                 if np.linalg.norm(shift) < .0005 and abs(angle) < .0005:
                     break
@@ -87,10 +103,18 @@ class LocalSLAM:
             keep = distances < .15
             ratio = keep.mean()
             error = np.sqrt(np.mean(distances[keep]**2)) if keep.any() else float('inf')
+            if rotation_only and keep.sum()>=30:
+                world=transform(points,prediction);ids,_=nearest(world,target)
+                bias=np.linalg.norm(np.mean(target[ids[keep]]-world[keep],axis=0))
+                if bias>.04:
+                    return self.result(False,'Giro: escaneo no coincide con el centro estimado',points)
             turn = (prediction[2]-self.pose[2]+math.pi) % (2*math.pi)-math.pi
-            if ratio < .65 or error > .08 or np.linalg.norm(prediction[:2]-self.pose[:2]) > .5 or abs(turn) > math.radians(30):
+            correction_turn=(prediction[2]-odom_prediction[2]+math.pi)%(2*math.pi)-math.pi
+            if recovering and (np.linalg.norm(prediction[:2]-odom_prediction[:2])>.12 or abs(correction_turn)>math.radians(12)):
+                return self.result(False, 'Recuperación rechazada: escaneo y odometría no coinciden', points)
+            if ratio < .65 or error > .08 or np.linalg.norm(prediction[:2]-self.pose[:2]) > .5 or (not recovering and abs(turn) > math.radians(30)):
                 return self.result(False, f'Rejected: overlap {ratio:.0%}, error {error:.3f} m', points)
-            note = f'Local localization · overlap {ratio:.0%} · error {error:.3f} m'
+            note = f'{"Mapa recuperado" if recovering else "Localización"} · coincidencia {ratio:.0%} · error {error:.3f} m'
         else:
             note = 'First scan: map origin'
         self.pose = prediction

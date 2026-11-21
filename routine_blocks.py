@@ -1,0 +1,44 @@
+"""Bounded routine blocks; physical arm and camera poses are estimates."""
+import math
+from aruco_alignment import ArucoAlignment
+
+
+class ArmRoutineBlock:
+    kind='arm_block'
+    def __init__(self,engine,kind,value,now):
+        self.engine=engine;self.started=now;self.done=False;self.seen_busy=False
+        self.duration=value['duration_ms']/1000
+        angles=value.get('joints')
+        if kind=='arm_xyz':
+            ok,angles,detail=engine.arm_model.compute_ik(value['xyz'])
+            if not ok:raise ValueError(f'Bloque XYZ sin solución: {detail}')
+        self.target=[round(float(angles[0])),round(float(angles[1])),round(float(angles[2])),
+                     round(value['rotation']),round(float(angles[3])),round(value['gripper'])]
+        engine.send_arm_pose(angles,value['gripper'],value['duration_ms'],'PC',value['rotation'],routine_owned=True)
+
+    def output(self,odom,now):
+        if now-self.started>self.duration+3:raise RuntimeError('Bloque brazo sin confirmación de telemetría')
+        channels=self.engine.telemetry.get('arm_angles')
+        if not isinstance(channels,list) or len(channels)!=6 or any(not isinstance(v,(int,float)) or not math.isfinite(v) for v in channels):
+            raise RuntimeError('Bloque brazo: telemetría inválida')
+        busy=bool(self.engine.telemetry.get('arm_busy',0))
+        if busy:self.seen_busy=True
+        if self.seen_busy and not busy and now-self.started>=self.duration and all(abs(a-b)<=1 for a,b in zip(channels,self.target)):
+            self.done=True
+        return 0,0
+
+
+class ArucoRoutineBlock:
+    kind='aruco_block'
+    def __init__(self,engine,reference,now):
+        self.engine=engine;self.done=False
+        self.controller=ArucoAlignment(reference,now,engine.min_pwm,require_orientation=True,require_new_sample=True)
+        self.engine.aruco_sample=None
+    def output(self,odom,now):
+        if not odom.imu_valid:raise RuntimeError('Bloque ArUco detenido: IMU no válida')
+        sample=self.engine.aruco_sample
+        if sample is not None and sample.get('identity')!=self.controller.ref.get('identity'):
+            raise RuntimeError('Bloque ArUco detenido: cambió la cámara o su configuración')
+        output=self.controller.output(self.engine.aruco_sample,now,odom)
+        self.done=self.controller.done
+        return output
