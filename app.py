@@ -413,13 +413,13 @@ class Engine(threading.Thread):
             self.emit('Brazo preparado; esperando lectura del ArUco para aproximar el AGV')
     def send_pickup_step(self,step):
         name,joints,gripper=step
-        self.send_arm_pose(joints,gripper,3000,'PC',90)
+        self.send_arm_pose(joints,gripper,3000,'PC',90,routine_owned=self.routine_running)
         action='Entrega' if self.pickup_sequence and self.pickup_sequence.release else 'Recolección'
         self.emit(f'{action}: {name}; STOP cancela')
     def start_pickup(self,release=False):
         reason=self.arm_motion_block('PC')
         if reason:raise ValueError(reason)
-        if self.arm_busy or self.live or self.primitive or self.routine or self.capture or self.aruco_alignment or self.collection_sequence or self.arm_approach or self.pickup_sequence:
+        if self.arm_busy or self.live or self.primitive or (self.routine and not self.routine_running) or self.capture or self.aruco_alignment or self.collection_sequence or self.arm_approach or self.pickup_sequence:
             raise ValueError('Detén el movimiento actual antes de recolectar')
         if release:
             channels=self.telemetry.get('arm_angles')
@@ -623,7 +623,11 @@ class Engine(threading.Thread):
         if not self.robot or time.monotonic()-self.last_robot>0.5 or not self.telemetry.get('armed'):
             raise ValueError('Fresh robot telemetry and power ON required')
         if self.primitive or self.live or self.capture:raise ValueError('STOP / complete the current motion first')
-        if kind in ('arm','arm_xyz'):
+        if kind in ('pickup','release'):
+            if self.sent_pwm!=(0,0) or self.telemetry.get('pl',0) or self.telemetry.get('pr',0):
+                raise ValueError('Wait for the AGV to stop before handling a piece')
+            self.start_pickup(release=kind=='release')
+        elif kind in ('arm','arm_xyz'):
             if self.sent_pwm!=(0,0) or self.telemetry.get('pl',0)!=0 or self.telemetry.get('pr',0)!=0:raise ValueError('Espera a que el AGV termine de detenerse antes de mover el brazo')
             self.primitive=ArmRoutineBlock(self,kind,value,time.monotonic())
         elif kind=='aruco':
@@ -921,7 +925,7 @@ class Engine(threading.Thread):
                     except (RuntimeError,ValueError,KeyError,TypeError) as e:
                         self.halt();self.test_result='Alineación detenida: '+str(e);self.emit(self.test_result);l=r=0
                 if self.robot and self.telemetry.get('armed') and now-self.last_robot<=0.5 and now-self.last_ui<=.6 and not self.estop_latched and self.telemetry.get('protocol')==1:
-                    if self.routine and not self.primitive and not self.live and now>=self.next_step_at:
+                    if self.routine and not self.primitive and not self.pickup_sequence and not self.live and now>=self.next_step_at:
                         kind,value=self.routine.popleft();self.start_test(kind,value,self.routine_cap);self.routine_step+=1
                         self.emit(f'Paso {self.routine_step}/{self.routine_total}: {kind}' + (f' {value:g}' if isinstance(value,(int,float)) else ''))
                     # Advance timed pulses only when their PWM will be sent.
@@ -990,6 +994,10 @@ class Engine(threading.Thread):
                         if step:self.send_pickup_step(step)
                         elif self.pickup_sequence.done:
                             released=self.pickup_sequence.release;self.pickup_sequence=None
+                            if self.routine_running:
+                                self.stopped=True;self.next_step_at=now+0.5
+                                if not self.routine:
+                                    self.routine_running=False;self.emit('Routine complete')
                             self.emit(('LISTO PARA OPERAR: secuencia para dejar la pieza finalizada. ' if released else 'LISTO PARA OPERAR: recolección finalizada, pinza cerrada. ')+'Verifica la posición física del brazo antes de retomar el control.')
                     except (RuntimeError,ValueError,TypeError) as exc:
                         self.halt();self.emit('Recolección detenida: '+str(exc))
@@ -1161,7 +1169,7 @@ class Window(QtWidgets.QMainWindow):
         self.button(df,'2. APPLY + SAVE distance scale',lambda:self.engine.post('distance_apply',self.real_distance.value()))
         cal.addWidget(distance_box);cal.addStretch()
         routine.addWidget(QtWidgets.QLabel('Bloques en orden · encoder seleccionado en Drive · STOP cancela todo'))
-        self.routine_kind=QtWidgets.QComboBox();self.routine_kind.addItems(['Avanzar / retroceder (cm)','Girar · IMU preciso (°)','Esperar (s)','Brazo · servos','Brazo · XYZ (mm)','Alinear ArUco 12'])
+        self.routine_kind=QtWidgets.QComboBox();self.routine_kind.addItems(['Avanzar / retroceder (cm)','Girar · IMU preciso (°)','Esperar (s)','Brazo · servos','Brazo · XYZ (mm)','Alinear ArUco 12','Pick Up Piece','Place Piece'])
         self.routine_value=self.number(-360,360,20,'');f=QtWidgets.QFormLayout();f.addRow('Bloque',self.routine_kind);f.addRow('Valor',self.routine_value);routine.addLayout(f)
         self.routine_joints=QtWidgets.QGroupBox('Ángulos de servos');jf=QtWidgets.QFormLayout(self.routine_joints)
         self.routine_joint_fields=[]
@@ -1189,6 +1197,10 @@ class Window(QtWidgets.QMainWindow):
         r=QtWidgets.QHBoxLayout();routine.addLayout(r);self.button(r,'Load',self.load_routine);self.button(r,'Save',self.save_routine)
         self.button(routine,'EJECUTAR PROGRAMA',self.run_routine)
         self.button(routine,'Abrir cámara ArUco',lambda:self.workspaces.setCurrentWidget(self.camera_scroll))
+        manual_actions=QtWidgets.QHBoxLayout();routine.addLayout(manual_actions)
+        manual_actions.addWidget(QtWidgets.QLabel('Manual actions'))
+        self.button(manual_actions,'Pick Up Piece',lambda:self.engine.post('pickup_start'))
+        self.button(manual_actions,'Place Piece',lambda:self.engine.post('release_start'))
         self.button(routine,'STOP programa',self.global_stop)
         self.build_arm_tab(arm)
         right=QtWidgets.QVBoxLayout();row.addLayout(right,1)
@@ -1423,6 +1435,7 @@ class Window(QtWidgets.QMainWindow):
         self.routine_list.clear()
         for n,(kind,v) in enumerate(self.routine_steps,1):
             if kind=='aruco':description='Alinear ArUco 12'
+            elif kind in ('pickup','release'):description='Pick Up Piece' if kind=='pickup' else 'Place Piece'
             elif kind in ('arm','arm_xyz'):
                 key='joints' if kind=='arm' else 'xyz'
                 description=f"{'Servos' if kind=='arm' else 'XYZ'} {v[key]} · CH3 {v['rotation']}° · pinza {v['gripper']}° · {v['duration_ms']/1000:g} s"
@@ -1435,11 +1448,11 @@ class Window(QtWidgets.QMainWindow):
         self.routine_arm_common.setVisible(index in (3,4))
     def add_step(self):
         try:
-            index=self.routine_kind.currentIndex();kind=('distance','imu_precise','wait','arm','arm_xyz','aruco')[index]
+            index=self.routine_kind.currentIndex();kind=('distance','imu_precise','wait','arm','arm_xyz','aruco','pickup','release')[index]
             if index in (3,4):
                 key='joints' if index==3 else 'xyz';fields=self.routine_joint_fields if index==3 else self.routine_xyz_fields
                 value={key:[f.value() for f in fields],'rotation':self.routine_rotation.value(),'gripper':self.routine_gripper.value(),'duration_ms':round(self.routine_duration.value()*1000)}
-            else:value=None if index==5 else self.routine_value.value()
+            else:value=None if index>=5 else self.routine_value.value()
             self.routine_steps=validate_routine(self.routine_steps+[(kind,value)]);self.refresh_steps()
         except ValueError as e:self.message(str(e))
     def move_routine_step(self,direction):

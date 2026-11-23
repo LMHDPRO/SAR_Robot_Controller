@@ -77,6 +77,24 @@ class RoutineBlockTests(unittest.TestCase):
             self.assertFalse(e.routine_running,e.test_result)
             self.assertTrue(any(m.startswith('ARM:') for m in e.robot.commands))
             self.assertNotIn('STOP\n',e.robot.commands)
+            # Advance only the sequence clock; exercise the real telemetry and queue.
+            from pickup_sequence import PickupSequence
+            from unittest.mock import patch
+            observe = PickupSequence.observe
+            origins = {}
+            def accelerated(sequence, channels, busy, now):
+                origin = origins.setdefault(sequence, sequence.started)
+                return observe(sequence, channels, busy, origin + (now-origin)*8)
+            with patch.object(PickupSequence, 'observe', accelerated):
+                e.post('routine', ([['pickup',None],['release',None],['wait',.1]],85,'left'))
+                deadline=time.monotonic()+12
+                while time.monotonic()<deadline:
+                    e.post('heartbeat');time.sleep(.03)
+                    if e.robot.target[5]==75 and e.routine_step==3 and not e.routine_running and sum(m.startswith('ARM:') for m in e.robot.commands)==11:break
+                self.assertEqual(sum(m.startswith('ARM:') for m in e.robot.commands),11)
+                self.assertEqual(e.robot.target,[108,149,180,90,7,75])
+                self.assertEqual(e.routine_step,3)
+                self.assertFalse(e.routine_running)
             ref={'identity':{'url':'test'},'xyz_camera_mm':[0,0,180],'rvec':[0,0,0]}
             e.post('routine',([['wait',.1],['aruco',None]],85,'left',ref))
             deadline=time.monotonic()+3

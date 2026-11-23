@@ -344,8 +344,8 @@ def validate_routine(steps):
             if not 10<=grip<=75 or not 0<=rotation<=180 or not 100<=duration<=10000 or int(duration)!=duration:
                 raise ValueError('Pinza, rotación o duración fuera de rango')
             result.append((kind,{key:list(values),'gripper':grip,'rotation':rotation,'duration_ms':int(duration)}));continue
-        if kind=='aruco':
-            if value is not None:raise ValueError('El bloque ArUco no requiere parámetros')
+        if kind in ('aruco','pickup','release'):
+            if value is not None:raise ValueError(f'{kind} requires no parameters')
             result.append((kind,None));continue
         if kind not in ('distance','turn','imu_precise','wait'):raise ValueError('Actions: distance (cm), turn / imu_precise (degrees), wait (s)')
         if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value):raise ValueError('Finite numeric value required')
