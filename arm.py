@@ -3,7 +3,12 @@ import numpy as np
 
 
 class ArmKinematics:
+    home_gripper = 60.0
+    home_wrist_rotation = 90.0
+    IK_METHODS = ("CCD", "Newton-Raphson", "Levenberg-Marquardt")
+
     def __init__(self):
+        self.ik_method = "CCD"
         self.d = np.array([127.027, 0, 0, 0], dtype=float)
         self.a = np.array([13.916, 119.401, 122.229, 122.271], dtype=float)
         self.alpha = np.array([-np.pi / 2, 0, 0, 0], dtype=float)
@@ -57,6 +62,25 @@ class ArmKinematics:
         if np.linalg.norm(target_xyz) > self.max_reach * 0.98:
             return False, None, "WARN:SINGULARITY"
 
+        if self.ik_method == "CCD":
+            best_theta = self._solve_ccd(target_xyz)
+        else:
+            best_theta = self._solve_jacobian(target_xyz)
+        final_position, _ = self.compute_fk_dh(best_theta)
+        error = float(np.linalg.norm(final_position - target_xyz))
+        servo_angles = self.convert_angles(best_theta, to_servo=True)
+        if (
+            error > 2.0
+            or not np.all(np.isfinite(servo_angles))
+            or np.any(servo_angles < -0.25)
+            or np.any(servo_angles > 180.25)
+        ):
+            return False, None, f"WARN:IK_ERROR={error:.1f}mm"
+
+        self.last_ik_theta = best_theta
+        return True, np.clip(servo_angles, 0.0, 180.0), error
+
+    def _solve_ccd(self, target_xyz):
         theta = self.last_ik_theta.copy()
         best_theta = theta.copy()
         best_error = float("inf")
@@ -91,19 +115,41 @@ class ArmKinematics:
             if best_error < 1.0:
                 break
 
-        final_position, _ = self.compute_fk_dh(best_theta)
-        error = float(np.linalg.norm(final_position - target_xyz))
-        servo_angles = self.convert_angles(best_theta, to_servo=True)
-        if (
-            error > 2.0
-            or not np.all(np.isfinite(servo_angles))
-            or np.any(servo_angles < -0.25)
-            or np.any(servo_angles > 180.25)
-        ):
-            return False, None, f"WARN:IK_ERROR={error:.1f}mm"
+        return best_theta
 
-        self.last_ik_theta = best_theta
-        return True, np.clip(servo_angles, 0.0, 180.0), error
+    def _solve_jacobian(self, target):
+        theta = self.last_ik_theta.copy()
+        damping = 5.0
+        use_lm = self.ik_method == "Levenberg-Marquardt"
+        for _ in range(80):
+            position, frames = self.compute_fk_dh(theta)
+            residual = target - position
+            error = np.linalg.norm(residual)
+            if error < 0.05:
+                break
+            jacobian = np.column_stack([
+                np.cross(frame[:3, 2], position - frame[:3, 3])
+                for frame in frames[:-1]
+            ])
+            if use_lm:
+                system = jacobian @ jacobian.T + damping**2 * np.eye(3)
+                step = jacobian.T @ np.linalg.solve(system, residual)
+            else:
+                step = np.linalg.pinv(jacobian, rcond=1e-6) @ residual
+            step *= 0.2 / max(0.2, np.max(np.abs(step)))
+            for _ in range(8):
+                candidate = np.clip(theta + step, self.limit_min, self.limit_max)
+                predicted, _ = self.compute_fk_dh(candidate)
+                if np.linalg.norm(target - predicted) < error - 1e-9:
+                    theta = candidate
+                    damping = max(0.1, damping / 2)
+                    break
+                step *= 0.5
+            else:
+                if not use_lm or damping >= 1000:
+                    break
+                damping *= 4
+        return theta
 
     def enforce_safety_zone(self, target_xyz, minimum_radius=70.0):
         x, y, z = np.asarray(target_xyz, dtype=float)

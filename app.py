@@ -523,6 +523,11 @@ class Engine(threading.Thread):
         elif k=='stop':self.halt(bool(v))
         elif k=='source':
             self.set_control_owner(v)
+        elif k=='arm_home':
+            if self.arm_approach is not None:
+                raise ValueError('STOP antes de volver a Home durante la secuencia')
+            self.send_arm_pose(self.arm_model.startup_angles, self.arm_model.home_gripper,
+                               2000, 'PC', self.arm_model.home_wrist_rotation)
         elif k=='arm_pose':self.handle_arm_pose(v)
         elif k=='arm_approach':self.start_arm_approach()
         elif k=='power':

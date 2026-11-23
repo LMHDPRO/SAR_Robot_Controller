@@ -11,6 +11,7 @@ matplotlib.use('QtAgg')
 import matplotlib.pyplot as plt
 import numpy as np
 import serial
+from arm import ArmKinematics as RobotKinematics
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QImage, QPixmap
@@ -22,93 +23,6 @@ def parse_camera_resolution(text: str) -> tuple[int, int]:
         return (max(64, int(width)), max(64, int(height)))
     except Exception:
         return (480, 480)
-
-class RobotKinematics:
-
-    def __init__(self):
-        self.d = np.array([127.027, 0, 0, 0])
-        self.a = np.array([13.916, 119.401, 122.229, 122.271])
-        self.alpha = np.array([-np.pi / 2, 0, 0, 0])
-        self.max_reach = np.sum(np.abs(self.d)) + np.sum(np.abs(self.a))
-        self.servo_offset = np.array([0.0, 126.5, 74.2, 106.0])
-        self.servo_dir = np.array([1.0, -1.0, 1.0, -1.0])
-        self.startup_angles = np.array([108.5, 149.5, 180.0, 90.0])
-        phys_min = np.array([0.0] * 4)
-        phys_max = np.array([180.0] * 4)
-        dh_bounds_1 = self.convert_angles(phys_min)
-        dh_bounds_2 = self.convert_angles(phys_max)
-        self.limit_min = np.minimum(dh_bounds_1, dh_bounds_2)
-        self.limit_max = np.maximum(dh_bounds_1, dh_bounds_2)
-        self.last_ik_theta = self.convert_angles(self.startup_angles)
-
-    def convert_angles(self, values, to_servo=False):
-        values = np.asarray(values, dtype=float)
-        return np.rad2deg(values) * self.servo_dir + self.servo_offset if to_servo else np.deg2rad((values - self.servo_offset) * self.servo_dir)
-
-    def compute_fk_dh(self, theta_input):
-        theta = [theta_input[0], theta_input[1] - np.pi / 2, theta_input[2], theta_input[3]]
-        T = np.eye(4)
-        T_matrices = [T.copy()]
-        for i in range(4):
-            ct, st = (np.cos(theta[i]), np.sin(theta[i]))
-            ca, sa = (np.cos(self.alpha[i]), np.sin(self.alpha[i]))
-            A = np.array([[ct, -st * ca, st * sa, self.a[i] * ct], [st, ct * ca, -ct * sa, self.a[i] * st], [0, sa, ca, self.d[i]], [0, 0, 0, 1]])
-            T = T @ A
-            T_matrices.append(T.copy())
-        return (T[0:3, 3], T_matrices)
-
-    def compute_fk(self, servo_deg):
-        return self.compute_fk_dh(self.convert_angles(servo_deg))
-
-    def compute_ik(self, target_xyz):
-        target_xyz = np.array(target_xyz, dtype=float)
-        if not np.all(np.isfinite(target_xyz)):
-            return (False, None, 'WARN:NON_FINITE_TARGET')
-        safe_reach = self.max_reach * 0.98
-        if np.linalg.norm(target_xyz) > safe_reach:
-            return (False, None, 'WARN:SINGULARITY')
-        theta = self.last_ik_theta.copy()
-        best_theta = theta.copy()
-        best_error = float('inf')
-        accept_error_mm = 1.0
-        max_final_error_mm = 2.0
-        for _ in range(80):
-            for i in range(3, -1, -1):
-                pos, T_matrices = self.compute_fk_dh(theta)
-                end_effector = pos
-                current_error = float(np.linalg.norm(end_effector - target_xyz))
-                if current_error < best_error:
-                    best_error = current_error
-                    best_theta = theta.copy()
-                if current_error < accept_error_mm:
-                    break
-                P_i = T_matrices[i][0:3, 3]
-                Z_i = T_matrices[i][0:3, 2]
-                V_cur = end_effector - P_i
-                V_tgt = target_xyz - P_i
-                V_cur_proj = V_cur - np.dot(V_cur, Z_i) * Z_i
-                V_tgt_proj = V_tgt - np.dot(V_tgt, Z_i) * Z_i
-                mag_cur = np.linalg.norm(V_cur_proj)
-                mag_tgt = np.linalg.norm(V_tgt_proj)
-                if mag_cur < 0.0001 or mag_tgt < 0.0001:
-                    continue
-                V_cur_proj /= mag_cur
-                V_tgt_proj /= mag_tgt
-                cos_angle = np.clip(np.dot(V_cur_proj, V_tgt_proj), -1.0, 1.0)
-                sin_angle = np.dot(Z_i, np.cross(V_cur_proj, V_tgt_proj))
-                delta_theta = np.clip(np.arctan2(sin_angle, cos_angle), -0.1, 0.1)
-                theta[i] += delta_theta
-                theta[i] = np.clip(theta[i], self.limit_min[i], self.limit_max[i])
-            if best_error < accept_error_mm:
-                break
-        final_pos, _ = self.compute_fk_dh(best_theta)
-        error = float(np.linalg.norm(final_pos - target_xyz))
-        final_servo_angles = self.convert_angles(best_theta, to_servo=True)
-        if error > max_final_error_mm or not np.all(np.isfinite(final_servo_angles)) or np.any(final_servo_angles < -0.25) or np.any(final_servo_angles > 180.25):
-            return (False, None, f'WARN:IK_ERROR={error:.1f}mm')
-        self.last_ik_theta = best_theta
-        final_servo_angles = np.clip(final_servo_angles, 0.0, 180.0)
-        return (True, final_servo_angles, error)
 
 class PendantLink:
 
@@ -537,6 +451,11 @@ class MainWindow(QMainWindow):
             fk_layout.addWidget(slider)
         self.ik_widget, self.ik_sliders, self.ik_labels = (QWidget(), [], [])
         ik_layout = QVBoxLayout(self.ik_widget)
+        self.ik_method = QComboBox()
+        self.ik_method.addItems(self.robot.IK_METHODS)
+        ik_layout.addWidget(QLabel('Método de cinemática inversa'))
+        ik_layout.addWidget(self.ik_method)
+        self.ik_method.currentTextChanged.connect(self._change_ik_method)
         max_r = int(self.robot.max_reach)
         for name, low, high, value in (('X Target (Desk)', -max_r, max_r, 0), ('Y Target (Desk)', 0, max_r, 0), ('Z Target (Desk)', 0, max_r, 200)):
             label = QLabel(f'{name}: {value} mm')
@@ -773,6 +692,17 @@ class MainWindow(QMainWindow):
         self.error_bar.setStyleSheet(f'color: #FFF; background-color: {color}; border-radius: 6px; padding: 10px; font-weight: bold;')
         self.error_bar.setText(msg)
         self.error_bar.show()
+
+    def _change_ik_method(self, method):
+        if self.path_active:
+            self.ik_method.blockSignals(True)
+            self.ik_method.setCurrentText(self.robot.ik_method)
+            self.ik_method.blockSignals(False)
+            self._show_msg('Detén la trayectoria antes de cambiar el método IK.', True)
+            return
+        self.robot.ik_method = method
+        self.robot.last_ik_theta = self.robot.convert_angles(self.current_physical_angles)
+        self._redraw_robot()
 
     def _toggle_mode(self):
         self._syncing = True
@@ -1758,6 +1688,7 @@ class MainWindow(QMainWindow):
         view_elev = float(getattr(self.ax, 'elev', 30.0))
         view_azim = float(getattr(self.ax, 'azim', 135.0))
         self.ax.cla()
+        self.ax.set_title(f'IK · {self.robot.ik_method}', color=self.TEXT_LIGHT)
         self.ax.set_facecolor(self.BG_MAIN)
 
         def draw_cylinder(p0, p1, R, color):

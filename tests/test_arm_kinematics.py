@@ -41,6 +41,21 @@ class ArmKinematicsTests(unittest.TestCase):
         self.assertTrue(np.all(solved_angles <= 180.0))
         self.assertLessEqual(error, 2.0)
 
+    def test_jacobian_methods_solve_xyz_and_preserve_seed_on_failure(self):
+        self.assertEqual(self.arm.ik_method, "CCD")
+        for method in ("Newton-Raphson", "Levenberg-Marquardt"):
+            with self.subTest(method=method):
+                arm = ArmKinematics()
+                arm.ik_method = method
+                target, _ = arm.compute_fk(arm.startup_angles + [5, -4, -3, 2])
+                success, angles, _ = arm.compute_ik(target)
+                self.assertTrue(success)
+                self.assertTrue(np.all((angles >= 0) & (angles <= 180)))
+                self.assertLess(np.linalg.norm(arm.compute_fk(angles)[0] - target), 2)
+                seed = arm.last_ik_theta.copy()
+                self.assertFalse(arm.compute_ik([0, 0, -350])[0])
+                np.testing.assert_array_equal(arm.last_ik_theta, seed)
+
     def test_safety_zone_pushes_axis_center_out_to_minimum_radius(self):
         safe_position = self.arm.enforce_safety_zone([0.0, 0.0, 120.0])
 

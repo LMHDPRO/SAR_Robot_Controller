@@ -42,6 +42,16 @@ class ArmControlTests(unittest.TestCase):
             ["ARM:90,126,74,90,106,65,2000\n"],
         )
 
+    def test_home_resets_wrist_and_gripper_and_requires_pc_control(self):
+        engine = self.ready_engine()
+        engine.arm_target_rotation = 42
+        engine.handle("arm_home", None)
+        self.assertEqual(engine.robot.messages, ["ARM:108,150,180,90,90,60,2000\n"])
+        engine.source = "COCO"
+        with self.assertRaises(ValueError):
+            engine.handle("arm_home", None)
+        self.assertEqual(len(engine.robot.messages), 1)
+
     def test_approach_waits_for_first_stage_and_stop_cancels_it(self):
         engine = self.ready_engine()
         engine.handle('arm_approach', None)

@@ -18,6 +18,20 @@ APP=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_home_button_restores_preview_without_sending_offline(self):
+        with patch.object(ArmWorkspace, '_load_vision_config'):
+            arm = ArmWorkspace(Engine())
+        arm.timer.stop()
+        arm.sync_pose([90, 100, 120, 95], 35)
+        arm.mode_selector.setCurrentIndex(1)
+        arm.btn_home.click()
+        arm._control_loop_tick()
+        np.testing.assert_allclose(arm.current_physical_angles, arm.robot.startup_angles)
+        np.testing.assert_allclose(arm.robot.last_ik_theta, arm.robot.convert_angles(arm.robot.startup_angles))
+        self.assertEqual(arm.slider_pinza.value(), 60)
+        self.assertTrue(arm.engine.commands.empty())
+        arm.deleteLater()
+
     def test_v7_and_sar_agree_on_fk(self):
         a,b=ArmKinematics(),RobotKinematics()
         for angles in ([90,126.5,74.2,106],[45,90,90,90],[130,80,110,65]):

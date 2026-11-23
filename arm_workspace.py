@@ -24,6 +24,10 @@ class ArmWorkspace(MainWindow):
         self.btn_send_manual.setText('Enviar pose (prueba)')
         self.btn_send_manual.setToolTip('Envía la pose actual una sola vez; para control continuo usa Live Robot Arm movement.')
         self.slider_pinza.setMinimum(10)
+        self.btn_home = QtWidgets.QPushButton('Pose segura (Home)')
+        self.btn_home.setToolTip('Recupera la pose inicial en la simulación. Con Live activo también la envía al brazo.')
+        self.btn_send_manual.parentWidget().layout().addWidget(self.btn_home)
+        self.btn_home.clicked.connect(self.return_home)
         self.btn_stop_path.clicked.connect(self.stop_robot)
         self.camera_source.setText(self.engine.runtime.get('arm_camera_url', ''))
         self.camera_source.setPlaceholderText('ESP32-S3 IP or base URL, e.g. 192.168.3.17')
@@ -43,6 +47,25 @@ class ArmWorkspace(MainWindow):
 
     def save_camera_url(self):
         self.engine.post('arm_camera_url', self.camera_source.text().strip())
+
+    def return_home(self):
+        if self.engine.source != 'PC' or self.path_active:
+            self._show_msg('Selecciona control PC y detén la trayectoria antes de volver a Home.', True)
+            return
+        live = self.chk_live.isChecked()
+        if live:
+            reason = self.block_reason()
+            if reason:
+                self._show_msg(reason, True)
+                return
+        self.mode_selector.setCurrentIndex(0)
+        self._force_draw = True
+        self.sync_pose(self.robot.startup_angles, self.robot.home_gripper)
+        self._on_slider_changed()
+        self.robot.last_ik_theta = self.robot.convert_angles(self.current_physical_angles)
+        if live:
+            self.engine.post('arm_home', None)
+        self._show_msg('Home solicitado al AGV.' if live else 'Pose inicial en la simulación.')
 
     def block_reason(self):
         reason=self.engine.arm_motion_block('PC')
