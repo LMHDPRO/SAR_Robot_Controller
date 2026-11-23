@@ -31,6 +31,7 @@ Adafruit_SSD1306 oled(128,64,&Wire,-1);
 Adafruit_PWMServoDriver pca(PCA_ADDR, Wire);
 bool oledReady=false,pcaReady=false;
 constexpr uint8_t ARM_SERVO_COUNT=6;
+constexpr int GRIPPER_MIN_DEG=5,GRIPPER_MAX_DEG=75;
 constexpr float ARM_POWER_POSE[ARM_SERVO_COUNT]={108.5f,149.5f,180.0f,90.0f,90.0f,60.0f};
 float armAngles[ARM_SERVO_COUNT];
 float armStart[ARM_SERVO_COUNT],armTarget[ARM_SERVO_COUNT];
@@ -66,7 +67,7 @@ uint16_t usToTicks(int us){
   return static_cast<uint16_t>((static_cast<uint32_t>(us)*4096U)/20000U);
 }
 int angleToUs(uint8_t channel,float angle){
-  angle=channel==5?constrain(angle,10.0f,75.0f):constrain(angle,0.0f,180.0f);
+  angle=channel==5?constrain(angle,static_cast<float>(GRIPPER_MIN_DEG),static_cast<float>(GRIPPER_MAX_DEG)):constrain(angle,0.0f,180.0f);
   return lroundf(600.0f+10.0f*angle);
 }
 void writeArmAngles(){
@@ -200,7 +201,7 @@ void parseCommand(){
       &&!timeoutActive&&duration>=100&&duration<=10000
       &&arm[0]>=0&&arm[0]<=180&&arm[1]>=0&&arm[1]<=180
       &&arm[2]>=0&&arm[2]<=180&&arm[3]>=0&&arm[3]<=180
-      &&arm[4]>=0&&arm[4]<=180&&arm[5]>=10&&arm[5]<=75){
+      &&arm[4]>=0&&arm[4]<=180&&arm[5]>=GRIPPER_MIN_DEG&&arm[5]<=GRIPPER_MAX_DEG){
     lastCommand=millis();
     startArmMotion(arm,static_cast<uint32_t>(duration),lastCommand,quintic);
     return;
@@ -291,12 +292,12 @@ void loop(){
         "\"tl\":%ld,\"tr\":%ld,\"pl\":%d,\"pr\":%d,\"armed\":%d,\"estop\":%d,\"pwm_ok\":%d,"
         "\"imu\":%d,\"imu_addr\":%d,\"heading_relative\":%.2f,\"heading\":%.2f,\"roll\":%.2f,\"pitch\":%.2f,"
         "\"imu_age_ms\":%lu,\"imu_read_ok\":%d,\"oled_ready\":%d,\"pca_ready\":%d,\"arm_protocol\":%u,"
-        "\"arm_quintic\":1,\"arm_busy\":%d,\"arm_angles\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+        "\"arm_quintic\":1,\"arm_gripper_min\":%d,\"arm_busy\":%d,\"arm_angles\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
         "\"tcp_rx_frames\":%lu,\"tcp_tx_frames\":%lu,\"cs\":%d,\"cg\":%d,\"ca\":%d,\"cm\":%d}\n",
         cutRelaysOnLoss,ESTOP_PIN<0?-1:(emergencyActive()?1:0),(unsigned long)bootId,(unsigned long)++seq,
         (unsigned long)now,(long)l,(long)r,actualL,actualR,armed,estopLatched?1:0,pwmOK,bno!=nullptr,
         bno?(bno==&imu29?41:40):0,relativeHeading,heading,rollDeg,pitchDeg,(unsigned long)(millis()-imuReadAt),
-        imuReadOK,oledReady,pcaReady,(unsigned int)ARM_PROTOCOL,armMoving,armAngles[0],armAngles[1],armAngles[2],
+        imuReadOK,oledReady,pcaReady,(unsigned int)ARM_PROTOCOL,GRIPPER_MIN_DEG,armMoving,armAngles[0],armAngles[1],armAngles[2],
         armAngles[3],armAngles[4],armAngles[5],(unsigned long)tcpRxFrames,(unsigned long)tcpTxFrames,cs,cg,ca,cm);
       if(tn>=sizeof(tx)){disconnectPC();return;}to=0;txAt=millis();
     }

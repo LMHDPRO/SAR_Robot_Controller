@@ -126,6 +126,75 @@ class CocoOsTests(unittest.TestCase):
         self.assertGreater(z_start - z_end, 4)
         self.assertLess(z_start - z_end, 6)
 
+    def test_cartesian_moves_use_the_method_selected_on_coco(self):
+        for mode in ('B', 'C'):
+            for index, method in enumerate(self.engine.arm_model.IK_METHODS):
+                with self.subTest(mode=mode, method=method):
+                    self.initialize_controller()
+                    e = self.engine
+                    e.source = 'COCO'
+                    self.arm_deadman(mode=mode, arm_ik_method=index, arm_speed_level=1)
+                    self.assertIn('ARMOPT:0\n', e.coco_state_frame(self.now))
+                    for _ in range(6):
+                        self.send(arm_filtered_x=35)
+                    self.assertEqual(e.arm_model.ik_method, method)
+                    self.assertTrue(any(message.startswith('ARM:') for message in self.robot.messages))
+
+    def test_coco_quintic_requires_agv_support_and_paces_arm_commands(self):
+        for mode in ('A', 'B', 'C'):
+            with self.subTest(mode=mode):
+                self.initialize_controller()
+                e = self.engine
+                e.source = 'COCO'
+                self.arm_deadman(mode=mode, arm_mode='RX_RY', arm_joint_index=3,
+                                 arm_speed_level=2, arm_ik_method=0, arm_quintic=1)
+                self.robot.messages.clear()
+                self.send(arm_filtered_y=100)
+                self.assertEqual(self.robot.messages, [])
+                self.assertIn('firmware SAR_AGV', e.arm_error)
+
+                e.telemetry['arm_quintic'] = 1
+                self.assertIn('ARMOPT:1\n', e.coco_state_frame(self.now))
+                self.send()
+                self.assertEqual(len(self.robot.messages), 1)
+                self.assertTrue(self.robot.messages[0].startswith('ARMQ:'))
+                self.send()
+                self.send()
+                self.assertEqual(len(self.robot.messages), 1)
+                self.now += .001
+                self.send()
+                self.assertEqual(len(self.robot.messages), 2)
+                self.assertTrue(self.robot.messages[-1].startswith('ARMQ:'))
+                self.send(deadman=0, motion_enabled=0, arm_filtered_y=0)
+                self.assertEqual(self.robot.messages[-1], 'STOP\n')
+
+    def test_arm_settings_change_requires_a_new_deadman_edge(self):
+        self.engine.source = 'COCO'
+        self.arm_deadman(mode='A', arm_joint_index=3)
+        self.robot.messages.clear()
+        self.send(arm_quintic=1, arm_filtered_y=100)
+        self.send()
+        self.assertEqual(self.robot.messages, ['STOP\n'])
+
+    def test_gripper_uses_the_minimum_supported_by_the_agv(self):
+        for mode in ('A', 'C'):
+            with self.subTest(mode=mode):
+                self.initialize_controller()
+                e = self.engine
+                e.source = 'COCO'
+                self.arm_deadman(mode=mode, arm_joint_index=5, encoder_mode='GRIP',
+                                 arm_speed_level=2)
+                e.arm_target_gripper = 10
+                for _ in range(3):
+                    self.send(arm_filtered_y=-100 if mode=='A' else 0, grip_change_pct=-20)
+                self.assertEqual(e.arm_target_gripper, 10)
+
+                e.telemetry['arm_gripper_min'] = 5
+                for _ in range(5):
+                    self.send(grip_change_pct=-40)
+                self.assertEqual(e.arm_target_gripper, 5)
+                self.assertEqual(self.robot.messages[-1].split(',')[-2], '5')
+
     def test_pad_reconnect_requires_new_deadman_edge_even_with_same_boot(self):
         e = self.engine
         e.source = 'COCO'

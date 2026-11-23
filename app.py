@@ -8,7 +8,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from lidar_workspace import LidarWorkspace
 from arm import ArmKinematics
-from defaults import RUNTIME_DEFAULTS, GEOMETRY_DEFAULTS
+from defaults import RUNTIME_DEFAULTS, GEOMETRY_DEFAULTS, GRIPPER_MIN_DEG, GRIPPER_MAX_DEG, LEGACY_GRIPPER_MIN_DEG
 from core import Wait, distance_scale, Geometry, Odometry, Primitive, SingleEncoderMove, HeadingHold, ImuTurn, WheelCapture, wheel_correction, validate_routine
 from aruco_alignment import ArucoAlignment
 from pickup_sequence import PickupSequence
@@ -60,6 +60,7 @@ class Signals(QtCore.QObject):
 
 COCO_ARM_SPEED = (.25, .55, 1.0)
 COCO_AGV_SPEED = (85, 110, 135)
+COCO_ARM_MOVE_MS = 150
 
 
 def coco_level(value, default):
@@ -76,6 +77,7 @@ class Engine(threading.Thread):
         self.arm_target_rotation=self.arm_rotation
         self.arm_busy=False;self.arm_error='';self.arm_approach=None;self.collection_sequence=None;self.pickup_sequence=None;self.coco_arm_at=None;self.coco_arm_z=None;self.coco_arm_grip=None
         self.coco_arm_target_xyz=None;self.coco_arm_target_mode=None
+        self.coco_arm_ready_at=0.0
         self.coco_joint_index=None;self.coco_joint_delta=0.0
         self.coco_wrist_delta=0.0;self.coco_grip_delta=0.0;self.coco_z_delta=0.0;self.coco_ik_budget=0.0
         self.coco_owner_ack=None;self.coco_turn=None;self.coco_turn_state='IDLE';self.coco_turn_ready=False
@@ -162,6 +164,7 @@ class Engine(threading.Thread):
         self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper
         self.arm_target_rotation=self.arm_rotation;self.arm_busy=False
         self.coco_arm_at=None
+        self.coco_arm_ready_at=0.0
         self.coco_arm_target_xyz=None;self.coco_arm_target_mode=None
         self.coco_joint_index=None;self.coco_joint_delta=0.0
         self.coco_wrist_delta=0.0;self.coco_grip_delta=0.0;self.coco_z_delta=0.0;self.coco_ik_budget=0.0
@@ -181,7 +184,10 @@ class Engine(threading.Thread):
         if self.telemetry.get('pca_ready')!=1:return 'PCA9685 not ready on AGV'
         if self.telemetry.get('arm_protocol')!=1:return 'Cargar firmware SAR con soporte del brazo'
         return ''
-    def send_arm_pose(self,angles,gripper,duration_ms,owner,rotation=None,routine_owned=False,streaming=False):
+    def gripper_min_deg(self):
+        if self.telemetry.get('arm_gripper_min')==GRIPPER_MIN_DEG:return GRIPPER_MIN_DEG
+        return LEGACY_GRIPPER_MIN_DEG
+    def send_arm_pose(self,angles,gripper,duration_ms,owner,rotation=None,routine_owned=False,streaming=False,*,coco_quintic=False):
         reason=self.arm_motion_block(owner)
         if reason:raise ValueError(reason)
         if owner=='PC' and (self.live or self.primitive or (self.routine and not routine_owned) or self.capture or self.aruco_alignment):
@@ -192,12 +198,15 @@ class Engine(threading.Thread):
         grip=float(gripper)
         wrist_rotation=self.arm_target_rotation if rotation is None else float(rotation)
         duration=int(duration_ms)
-        if not math.isfinite(grip) or not 10<=grip<=75:raise ValueError('Gripper angle must be between 10 and 75 degrees')
+        if not math.isfinite(grip) or not GRIPPER_MIN_DEG<=grip<=GRIPPER_MAX_DEG:
+            raise ValueError(f'Pinza fuera del rango SAR {GRIPPER_MIN_DEG}–{GRIPPER_MAX_DEG}°')
+        if grip<self.gripper_min_deg():
+            raise ValueError(f'Actualiza el firmware SAR_AGV para mover la pinza por debajo de {LEGACY_GRIPPER_MIN_DEG}°')
         if not math.isfinite(wrist_rotation) or not 0<=wrist_rotation<=180:raise ValueError('Wrist rotation angle must be between 0 and 180 degrees')
         if not 100<=duration<=10000:raise ValueError('Arm move duration must be between 100 and 10000 ms')
         channels=[int(round(target[0])),int(round(target[1])),int(round(target[2])),int(round(wrist_rotation)),int(round(target[3])),int(round(grip))]
         command="ARM"
-        if self.arm_quintic and owner=='PC' and not streaming:
+        if (owner=='PC' and self.arm_quintic and not streaming) or (owner=='COCO' and coco_quintic):
             if self.telemetry.get('arm_quintic')!=1:
                 raise ValueError('Actualiza el firmware SAR_AGV para usar el perfil quíntico o selecciona Lineal.')
             command="ARMQ"
@@ -207,6 +216,15 @@ class Engine(threading.Thread):
         self.arm_model.last_ik_theta=self.arm_model.convert_angles(target)
         self.arm_busy=True;self.arm_error=''
         if owner=='PC':self.emit('Pose arm transmitida al AGV por la conexión existente')
+    def send_coco_arm_pose(self,p,now,angles,gripper,rotation=None):
+        quintic=p.get('arm_quintic')==1
+        # Let each quintic segment finish before sending the next joystick target.
+        if quintic and now<self.coco_arm_ready_at:
+            return False
+        self.send_arm_pose(angles,gripper,COCO_ARM_MOVE_MS,'COCO',rotation,coco_quintic=quintic)
+        if quintic:
+            self.coco_arm_ready_at=now+COCO_ARM_MOVE_MS/1000.0
+        return True
     def update_arm_joints_from_coco(self,p,now):
         reason=self.arm_motion_block('COCO')
         if reason:
@@ -238,15 +256,15 @@ class Engine(threading.Thread):
         elif joint_index==4:
             angles[3]=max(0.0,min(180.0,angles[3]+delta))
         else:
-            gripper=max(10.0,min(75.0,gripper+delta))
+            gripper=max(self.gripper_min_deg(),min(GRIPPER_MAX_DEG,gripper+delta))
         if (np.max(np.abs(angles-self.arm_target_angles))<.5
                 and abs(rotation-self.arm_target_rotation)<.5
                 and abs(gripper-self.arm_target_gripper)<.5):
             self.coco_joint_delta=0.0
             return
         try:
-            self.send_arm_pose(angles,gripper,150,'COCO',rotation)
-            self.coco_joint_delta=0.0
+            if self.send_coco_arm_pose(p,now,angles,gripper,rotation):
+                self.coco_joint_delta=0.0
         except ValueError as exc:
             self.arm_error=str(exc)
     def update_arm_from_coco(self,p,now):
@@ -285,6 +303,7 @@ class Engine(threading.Thread):
         target_angles=self.arm_target_angles.copy()
         current_xyz=self.arm_model.compute_fk(target_angles)[0]
         gripper=self.arm_target_gripper
+        min_grip=self.gripper_min_deg()
         arm_mode=p.get('arm_mode','XY')
         encoder_mode=p.get('encoder_mode','Z')
         if encoder_mode not in ('Z','GRIP'):
@@ -324,16 +343,16 @@ class Engine(threading.Thread):
                 self.coco_grip_delta+=grip
                 wrist=self.coco_wrist_delta;grip=0.0
             target_angles[3]=max(0.0,min(180.0,target_angles[3]+wrist))
-            gripper=max(10.0,min(75.0,gripper+grip))
+            gripper=max(min_grip,min(GRIPPER_MAX_DEG,gripper+grip))
             target_xyz=self.arm_model.compute_fk(target_angles)[0]
             target_xyz[2]+=z_delta
         else:
             self.arm_error='Unknown COCO arm mode'
             return
         if encoder_mode=='GRIP' and not profiled:
-            gripper=max(10.0,min(75.0,gripper+grip_delta*.65))
+            gripper=max(min_grip,min(GRIPPER_MAX_DEG,gripper+grip_delta*.65))
         if profiled:
-            self.coco_grip_delta=max(10-gripper,min(75-gripper,self.coco_grip_delta))
+            self.coco_grip_delta=max(min_grip-gripper,min(GRIPPER_MAX_DEG-gripper,self.coco_grip_delta))
             gripper+=self.coco_grip_delta
         target_xyz[0]=max(-self.arm_model.max_reach,min(self.arm_model.max_reach,float(target_xyz[0])))
         target_xyz[1]=max(0.0,min(self.arm_model.max_reach,float(target_xyz[1])))
@@ -343,6 +362,12 @@ class Engine(threading.Thread):
             target_xyz[:2]=[70.0,0.0] if radius<0.1 else target_xyz[:2]*(70.0/radius)
         needs_ik=(arm_mode=='XY' and moving) or abs(z_delta)>=.001
         if needs_ik:
+            method_index=p.get('arm_ik_method',0)
+            methods=self.arm_model.IK_METHODS
+            if type(method_index) is not int or not 0<=method_index<len(methods):
+                self.arm_error='Unknown COCO IK method'
+                return
+            self.arm_model.ik_method=methods[method_index]
             if profiled or arm_mode=='RX_RY':self.arm_model.last_ik_theta=self.arm_model.convert_angles(target_angles)
             distance=float(np.linalg.norm(target_xyz-current_xyz))
             if distance>15.0:
@@ -374,7 +399,8 @@ class Engine(threading.Thread):
                 and abs(gripper-self.arm_target_gripper)<.5):
             return
         try:
-            self.send_arm_pose(angles,gripper,150,'COCO')
+            if not self.send_coco_arm_pose(p,now,angles,gripper):
+                return
             if profiled:
                 if needs_ik:
                     moved_z=float(self.arm_model.compute_fk(angles)[0][2]-current_xyz[2])
@@ -705,6 +731,8 @@ class Engine(threading.Thread):
         if self.pad_data.get('coco_os')==11:
             frames.extend((f'COCO11:{int(pose)},{pwm_l:.0f},{pwm_r:.0f}',
                            f'TURN:{self.coco_turn_state},{target:.0f},{self.coco_turn_progress:.1f}'))
+            if 'arm_ik_method' in self.pad_data:
+                frames.append(f"ARMOPT:{int(fresh and t.get('arm_quintic')==1)}")
             if pose:
                 points=(value for transform in transforms for value in transform[:3,3])
                 frames.append('POSE:'+','.join(f'{v:.1f}' for v in (*channels,*points)))
@@ -772,7 +800,9 @@ class Engine(threading.Thread):
                 return
 
         mode=p.get('mode')
-        if self.source=='COCO' and previous and mode!=previous.get('mode'):
+        settings_changed=previous and any(
+            p.get(key,0)!=previous.get(key,0) for key in ('arm_ik_method','arm_quintic'))
+        if self.source=='COCO' and previous and (mode!=previous.get('mode') or settings_changed):
             self.halt();self.coco_arm_z=self.coco_arm_grip=None
         active = (self.source=='COCO' and mode in ('A','B','C','D')
                   and not p.get('menu_open') and not p.get('debug_open')
@@ -1192,7 +1222,7 @@ class Window(QtWidgets.QMainWindow):
         xyz_note=QtWidgets.QLabel('IK estimada: comprueba el recorrido; no detecta colisiones.');xyz_note.setWordWrap(True);xf.addRow(xyz_note)
         routine.addWidget(self.routine_xyz)
         self.routine_arm_common=QtWidgets.QGroupBox('Pinza y movimiento');af=QtWidgets.QFormLayout(self.routine_arm_common)
-        self.routine_rotation=self.number(0,180,90,'°');self.routine_gripper=self.number(10,75,75,'°');self.routine_duration=self.number(.1,10,3,' s')
+        self.routine_rotation=self.number(0,180,90,'°');self.routine_gripper=self.number(GRIPPER_MIN_DEG,GRIPPER_MAX_DEG,75,'°');self.routine_duration=self.number(.1,10,3,' s')
         af.addRow('Rotación muñeca CH3',self.routine_rotation);af.addRow('Pinza CH5',self.routine_gripper);af.addRow('Duración',self.routine_duration);routine.addWidget(self.routine_arm_common)
         self.routine_kind.currentIndexChanged.connect(self.update_routine_editor);self.update_routine_editor()
         self.button(routine,'Añadir bloque',self.add_step);self.routine_list=QtWidgets.QListWidget()
@@ -1333,7 +1363,7 @@ class Window(QtWidgets.QMainWindow):
         grip_layout=QtWidgets.QVBoxLayout(grip_group)
         self.arm_gripper_label=QtWidgets.QLabel()
         self.arm_gripper_slider=QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.arm_gripper_slider.setRange(10,75);self.arm_gripper_slider.setValue(60)
+        self.arm_gripper_slider.setRange(GRIPPER_MIN_DEG,GRIPPER_MAX_DEG);self.arm_gripper_slider.setValue(60)
         self.arm_gripper_slider.valueChanged.connect(self.update_arm_preview)
         grip_layout.addWidget(self.arm_gripper_label);grip_layout.addWidget(self.arm_gripper_slider)
         layout.addWidget(grip_group)

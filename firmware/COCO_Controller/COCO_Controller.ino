@@ -21,6 +21,7 @@ constexpr int RELEASE_PERCENT=45;
 constexpr int JOY_DEADZONE=150;
 constexpr float FILTER_ALPHA=0.30f;
 constexpr int TRANSITIONS_PER_CLICK=4;
+constexpr uint32_t SPLASH_MS=2000;
 
 Adafruit_SSD1306 oled(128,64,&Wire,-1);
 bool oledReady=false;
@@ -105,15 +106,18 @@ int consumeEncoder(){
 }
 
 enum CocoPage:uint8_t{PAGE_MAIN,PAGE_MENU,PAGE_DEBUG};
-enum CocoItem:uint8_t{ITEM_OWNER,ITEM_POWER,ITEM_MODE,ITEM_ARM_SPEED,ITEM_AGV_SPEED,ITEM_TURN,ITEM_FEEL,ITEM_DEBUG,ITEM_RESET,ITEM_COUNT};
+enum CocoItem:uint8_t{ITEM_OWNER,ITEM_POWER,ITEM_MODE,ITEM_IK,ITEM_PROFILE,ITEM_ARM_SPEED,ITEM_AGV_SPEED,ITEM_TURN,ITEM_FEEL,ITEM_DEBUG,ITEM_RESET,ITEM_COUNT};
 CocoPage page=PAGE_MAIN;
 int selected=0,debugTab=0,controlMode=1,armSpeedSetting=1,agvSpeedSetting=0,turnStepIndex=1,armFeel=0,selectedArmJoint=0;
+int armIkMethod=0;
+bool armQuintic=false;
 bool preciseTurnEnabled=false;
 bool rotationMode=false,gripMode=false,armCenterRequired=false;
 bool motionEnabled=false,releaseSeen=false,menuWaitRelease=false,navigationReady=false;
 uint32_t navRepeatAt=0, splashAt=0;
 float zChange=0,gripChange=0;
 const char* MODE_NAMES[]={"JOINTS","DUAL","TCP","AGV"};
+const char* IK_NAMES[]={"CCD","NEWTON-RAPHSON","LEVENBERG-MARQUARDT"};
 const char* SPEED_NAMES[]={"LOW","MID","HIGH"};
 const char* JOINT_NAMES[]={"BASE","SHOULDER","ELBOW","WRIST R","WRIST E","GRIP"};
 const int TURN_STEPS[]={45,90,180};
@@ -126,7 +130,9 @@ bool serverStarted=false,stateValid=false,pythonControl=false,agvFresh=false,agv
 uint32_t stateAt=0,bootId=0,seq=0,powerId=0,powerAt=0;
 bool powerPending=false,powerEnable=false;
 uint32_t ownerId=0,ownerAt=0,hostAt=0,ownerNoticeAt=0;
+uint32_t armOptionsAt=0;
 bool ownerPending=false,ownerTarget=false,host11=false,ownerDenied=false;
+bool armOptionsValid=false,agvQuintic=false;
 bool armPoseValid=false;
 float joints[6],nodes[5][3];
 int pwmL=0,pwmR=0,turnTarget=0;
@@ -140,8 +146,14 @@ char rx[180],tx[950];size_t rxN=0,txN=0,txOffset=0;
 bool rxOverflow=false;uint32_t txStarted=0,lastPacket=0;
 bool linkFresh(){return pythonClient&&pythonClient.connected()&&stateValid&&millis()-stateAt<1500;}
 bool robotReady(){return linkFresh()&&pythonControl&&agvFresh&&agvArmed;}
-bool splashActive(){return oledReady&&millis()-splashAt<1000;}
-bool allowed(){return motionEnabled&&robotReady()&&deadman.held()&&page==PAGE_MAIN&&!ownerPending&&!powerPending&&!armCenterRequired&&!splashActive();}
+bool splashActive(){return oledReady&&millis()-splashAt<SPLASH_MS;}
+bool armOptionsReady(){return linkFresh()&&armOptionsValid&&millis()-armOptionsAt<500;}
+bool armSettingsAvailable(){
+  if(controlMode==3)return true;
+  if(armQuintic)return armOptionsReady()&&agvQuintic;
+  return controlMode==0||armIkMethod==0||armOptionsReady();
+}
+bool allowed(){return motionEnabled&&robotReady()&&armSettingsAvailable()&&deadman.held()&&page==PAGE_MAIN&&!ownerPending&&!powerPending&&!armCenterRequired&&!splashActive();}
 bool driveAllowed(){return allowed()&&controlMode!=0;}
 bool yawFresh(){return agvFresh&&yawValid&&millis()-yawAt<350;}
 bool hostReady(){return linkFresh()&&host11&&millis()-hostAt<500;}
@@ -173,6 +185,7 @@ void closePython(const char* reason){
   if(pythonClient)pythonClient.stop();
   stateValid=pythonControl=agvFresh=agvArmed=powerPending=false;yawValid=0;lockMotion();
   agvData=ownerPending=host11=ownerDenied=armPoseValid=false;
+  armOptionsValid=agvQuintic=false;
   strcpy(turnState,"IDLE");
   rxN=txN=txOffset=0;rxOverflow=false;if(reason)Serial.println(reason);
 }
@@ -197,6 +210,9 @@ void parsePython(){
     if(sscanf(rx+7,"%d,%d,%d%n",&valid,&l,&r,&n)==3&&n==(int)strlen(rx+7)){
       host11=true;hostAt=millis();if(!valid)armPoseValid=false;pwmL=l;pwmR=r;
     }return;
+  }
+  if(!strcmp(rx,"ARMOPT:0")||!strcmp(rx,"ARMOPT:1")){
+    armOptionsValid=true;agvQuintic=rx[7]=='1';armOptionsAt=millis();return;
   }
   if(!strncmp(rx,"POSE:",5)){
     const char* next=rx+5;
@@ -248,7 +264,7 @@ void serviceTCP(){
       "{\"type\":\"coco\",\"control_style\":\"manual90\",\"boot_id\":%lu,\"seq\":%lu,"
       "\"mode\":\"%c\",\"menu_open\":%d,\"debug_open\":%d,\"deadman\":%d,\"motion_enabled\":%d,"
       "\"arm_filtered_x\":%d,\"arm_filtered_y\":%d,\"agv_filtered_x\":%d,\"agv_filtered_y\":%d,"
-      "\"arm_joint_index\":%d,"
+      "\"arm_joint_index\":%d,\"arm_ik_method\":%d,\"arm_quintic\":%d,"
       "\"drive\":%d,\"steer\":%d,\"arm_mode\":\"%s\",\"encoder_mode\":\"%s\","
       "\"distance_cm\":0,\"turn_deg\":0,\"turn_jog\":0,\"z_change_mm\":%.2f,\"grip_change_pct\":%.2f,"
       "\"speed_level\":%d,\"power_request_id\":%lu,\"power_pending\":%d,\"power_enable\":%d,"
@@ -256,7 +272,7 @@ void serviceTCP(){
       "\"owner_request_id\":%lu,\"owner_pending\":%d,\"owner_target\":\"%s\"}\n",
       (unsigned long)bootId,(unsigned long)++seq,'A'+controlMode,page==PAGE_MENU,page==PAGE_DEBUG,
       deadman.held(),enabled,controlMode==3?0:axes[0].output,controlMode==3?0:axes[1].output,axes[2].output,axes[3].output,
-      controlMode==3?-1:selectedArmJoint,driving?driveRequest():0,
+      controlMode==3?-1:selectedArmJoint,armIkMethod,armQuintic,driving?driveRequest():0,
       driving&&(!turnMode()||!preciseTurnEnabled||hostReady())?steerRequest():0,rotationMode?"RX_RY":"XY",gripMode?"GRIP":"Z",
       controlMode==3?0:zChange,controlMode==3?0:gripChange,agvSpeedSetting,(unsigned long)powerId,powerPending,powerEnable,
       armSpeedSetting,agvSpeedSetting,turnMode()&&preciseTurnEnabled?TURN_STEPS[turnStepIndex]:0,
@@ -276,7 +292,8 @@ void serviceTCP(){
 
 void updateControls(int clicks,uint32_t now){
   if(splashActive()){lockMotion();return;}
-  if(!deadman.held()||page!=PAGE_MAIN||!robotReady())motionEnabled=false;
+  bool ready=robotReady()&&armSettingsAvailable();
+  if(!deadman.held()||page!=PAGE_MAIN||!ready)motionEnabled=false;
   if(page==PAGE_DEBUG){
     if(deadman.rose)debugTab=(debugTab+1)%6;
     if(agvButton.fell){page=PAGE_MENU;navigationReady=false;lockMotion();}return;
@@ -298,6 +315,8 @@ void updateControls(int clicks,uint32_t now){
       case ITEM_OWNER:requestOwner();break;
       case ITEM_POWER:requestPower(clicks>0);break;
       case ITEM_MODE:controlMode=wrapIndex(controlMode+clicks,4);break;
+      case ITEM_IK:if(armOptionsReady())armIkMethod=wrapIndex(armIkMethod+clicks,3);else if(clicks<0)armIkMethod=0;break;
+      case ITEM_PROFILE:if(clicks<0)armQuintic=false;else if(armOptionsReady()&&agvQuintic)armQuintic=true;break;
       case ITEM_ARM_SPEED:if(hostReady())armSpeedSetting=constrain(armSpeedSetting+clicks,0,2);break;
       case ITEM_AGV_SPEED:agvSpeedSetting=constrain(agvSpeedSetting+clicks,0,2);break;
       case ITEM_TURN:if(hostReady())preciseTurnEnabled=clicks>0;break;
@@ -306,9 +325,9 @@ void updateControls(int clicks,uint32_t now){
       case ITEM_RESET:zChange=0;gripChange=0;break;
     }return;
   }
-  if(!robotReady())releaseSeen=false;
-  if(deadman.released()&&robotReady())releaseSeen=true;
-  if(deadman.rose){motionEnabled=releaseSeen&&allCentered()&&robotReady()&&!ownerPending&&!powerPending;releaseSeen=false;}
+  if(!ready)releaseSeen=false;
+  if(deadman.released()&&ready)releaseSeen=true;
+  if(deadman.rose){motionEnabled=releaseSeen&&allCentered()&&ready&&!ownerPending&&!powerPending;releaseSeen=false;}
   if(controlMode==3)armCenterRequired=false;
   if((controlMode==1||controlMode==2)&&armButton.rose){rotationMode=!rotationMode;armCenterRequired=true;}
   if(axes[0].centered()&&axes[1].centered())armCenterRequired=false;
@@ -537,6 +556,11 @@ void drawMenu(){
   topBar("MENU");char rows[ITEM_COUNT][24];
   snprintf(rows[ITEM_OWNER],24,"%s",ownerPending?"CONTROL: WAIT":ownerDenied&&millis()-ownerNoticeAt<1800?"CONTROL: RETRY":!hostReady()?"CONTROL: OFFLINE":pythonControl?"GIVE TO PC":"TAKE CTRL");
   snprintf(rows[ITEM_MODE],24,"MODE %c: %s",'A'+controlMode,MODE_NAMES[controlMode]);
+  snprintf(rows[ITEM_IK],24,"IK: %s",armOptionsReady()?IK_NAMES[armIkMethod]:armIkMethod?"HOST OFFLINE":"CCD");
+  const char* profile=armQuintic?"QUINTIC":"LINEAR";
+  if(!armOptionsReady())profile=armQuintic?"HOST OFFLINE":"LINEAR";
+  else if(!agvQuintic)profile=armQuintic?"UPDATE AGV":"LINEAR ONLY";
+  snprintf(rows[ITEM_PROFILE],24,"PROFILE: %s",profile);
   snprintf(rows[ITEM_ARM_SPEED],24,"ARM SPEED: %s",hostReady()?SPEED_NAMES[armSpeedSetting]:"--");
   snprintf(rows[ITEM_AGV_SPEED],24,"AGV SPEED: %s",SPEED_NAMES[agvSpeedSetting]);
   snprintf(rows[ITEM_TURN],24,"PRECISE TURN: %s",!hostReady()?"--":preciseTurnEnabled?"ON":"OFF");
@@ -594,7 +618,7 @@ void drawSplash(){
     int sx=x*32/40,sy=y*32/40;if(pgm_read_byte(&COCO_BITMAP[sy*4+sx/8])&(0x80>>(sx%8)))oled.drawPixel(44+x,y,SSD1306_WHITE);
   }
   oled.setTextSize(1);textAt(31,43,"COCO OS 1.1");
-  bar(19,55,90,5,(millis()-splashAt)/1000.0f);
+  bar(19,55,90,5,(millis()-splashAt)/static_cast<float>(SPLASH_MS));
 }
 void updateDisplay(){
   if(!oledReady||oledOffset<1024)return;

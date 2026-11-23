@@ -47,6 +47,20 @@ class ArmControlTests(unittest.TestCase):
         }
         return engine
 
+    def test_gripper_extension_requires_support_from_the_agv(self):
+        engine = self.ready_engine()
+        self.addCleanup(engine.pool.shutdown)
+        angles = [90, 126, 74, 106]
+        with self.assertRaisesRegex(ValueError, "firmware SAR_AGV"):
+            engine.send_arm_pose(angles, 5, 2000, "PC")
+        self.assertEqual(engine.robot.messages, [])
+
+        engine.telemetry["arm_gripper_min"] = 5
+        with self.assertRaisesRegex(ValueError, "5–75"):
+            engine.send_arm_pose(angles, 4, 2000, "PC")
+        engine.send_arm_pose(angles, 5, 2000, "PC")
+        self.assertEqual(engine.robot.messages[-1], "ARM:90,126,74,90,106,5,2000\n")
+
     def test_pc_pose_uses_the_existing_agv_link_and_fixed_wrist_rotation(self):
         engine = self.ready_engine()
 

@@ -1,6 +1,7 @@
 """Units: mm, radians, encoder A-channel CHANGE ticks; yaw positive LEFT."""
 import math
 from dataclasses import dataclass
+from defaults import GRIPPER_MIN_DEG, GRIPPER_MAX_DEG
 
 @dataclass
 class Geometry:
@@ -341,7 +342,7 @@ def validate_routine(steps):
             grip=value.get('gripper');rotation=value.get('rotation');duration=value.get('duration_ms')
             if any(isinstance(x,bool) or not isinstance(x,(int,float)) or not math.isfinite(x) for x in (grip,rotation,duration)):
                 raise ValueError('Pinza, rotación o duración inválidas')
-            if not 10<=grip<=75 or not 0<=rotation<=180 or not 100<=duration<=10000 or int(duration)!=duration:
+            if not GRIPPER_MIN_DEG<=grip<=GRIPPER_MAX_DEG or not 0<=rotation<=180 or not 100<=duration<=10000 or int(duration)!=duration:
                 raise ValueError('Pinza, rotación o duración fuera de rango')
             result.append((kind,{key:list(values),'gripper':grip,'rotation':rotation,'duration_ms':int(duration)}));continue
         if kind in ('aruco','pickup','release'):

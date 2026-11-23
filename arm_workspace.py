@@ -2,6 +2,7 @@
 import time
 import numpy as np
 from PySide6 import QtWidgets
+from defaults import GRIPPER_MIN_DEG, GRIPPER_MAX_DEG
 from robotarm_v7 import MainWindow
 
 
@@ -24,7 +25,7 @@ class ArmWorkspace(MainWindow):
         self.chk_pendant.setText('COCO: seleccionar en la barra global')
         self.btn_send_manual.setText('Enviar pose (prueba)')
         self.btn_send_manual.setToolTip('Envía la pose actual una sola vez; para control continuo usa Live Robot Arm movement.')
-        self.slider_pinza.setMinimum(10)
+        self.slider_pinza.setRange(GRIPPER_MIN_DEG, GRIPPER_MAX_DEG)
         self.btn_home = QtWidgets.QPushButton('Pose segura (Home)')
         self.btn_home.setToolTip('Recupera la pose inicial en la simulación. Con Live activo también la envía al brazo.')
         self.btn_send_manual.parentWidget().layout().addWidget(self.btn_home)
@@ -33,7 +34,7 @@ class ArmWorkspace(MainWindow):
         self.motion_profile = QtWidgets.QComboBox()
         self.motion_profile.addItem('Lineal', False)
         self.motion_profile.addItem('Quíntico', True)
-        self.motion_profile.setToolTip('Vista articular, Home y poses de rutinas. Live y COCO mantienen el control continuo.')
+        self.motion_profile.setToolTip('Vista articular, Home y poses de rutinas del PC. Live usa el perfil lineal. COCO tiene su propio ajuste.')
         profile_layout.addRow('Perfil articular', self.motion_profile)
         self.btn_send_manual.parentWidget().layout().addLayout(profile_layout)
         self.motion_profile.currentIndexChanged.connect(self.change_motion_profile)
@@ -189,8 +190,6 @@ class ArmWorkspace(MainWindow):
         if reason:
             self.cancel_motion();self._show_msg(reason,True);return
         grip=float(self.slider_pinza.value())
-        if not 10<=grip<=75:
-            self.cancel_motion();self._show_msg('Pinza fuera del rango SAR 10–75°',True);return
         self.engine.post('arm_stream_pose' if live_mode else 'arm_pose',(self.current_physical_angles.copy(),grip,150 if live_mode else 2000))
         if not live_mode:self._show_msg('Pose enviada a la cola SAR; confirmar estado del firmware en la barra global.')
 
