@@ -1,0 +1,9 @@
+<launch>
+
+<rosparam file="$(find Brazo_Robotico_simplificado_description)/launch/controller.yaml" command="load"/>
+<node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false" output="screen" ns="Brazo_Robotico_simplificado" args="Revolución 102_position_controller Revolución 103_position_controller Revolución 104_position_controller Revolución 105_position_controller Revolución 106_position_controller joint_state_controller "/>
+<node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" respawn="false" output="screen">
+  <remap from="/joint_states" to="/Brazo_Robotico_simplificado/joint_states"/>
+</node>
+
+</launch>

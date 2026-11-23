@@ -1,0 +1,59 @@
+<?xml version="1.0" ?>
+<robot name="Brazo_Robotico_simplificado" xmlns:xacro="http://www.ros.org/wiki/xacro" >
+
+<transmission name="Revolución 102_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="Revolución 102">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="Revolución 102_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<transmission name="Revolución 103_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="Revolución 103">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="Revolución 103_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<transmission name="Revolución 104_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="Revolución 104">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="Revolución 104_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<transmission name="Revolución 105_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="Revolución 105">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="Revolución 105_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<transmission name="Revolución 106_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="Revolución 106">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="Revolución 106_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+</robot>

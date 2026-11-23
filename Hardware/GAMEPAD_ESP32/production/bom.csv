@@ -1,0 +1,12 @@
+﻿Designator,Footprint,Quantity,Value,LCSC Part #
+A1,Arduino_Nano,1,Arduino_Nano_v3.x,
+J1,PinSocket_1x05_P2.54mm_Vertical,1,JOYSTICK_1,
+J2,PinSocket_1x05_P2.54mm_Vertical,1,JOYSTICK_2,
+J3,PinSocket_1x05_P2.54mm_Vertical,1,ENCODER,
+J4,PinSocket_1x04_P2.54mm_Vertical,1,OLED,
+J5,PinSocket_1x05_P2.54mm_Vertical,1,PUSHBUTTONS,
+J6,PinSocket_1x02_P2.54mm_Vertical,1,E-STOP,
+J7,PinSocket_1x02_P2.54mm_Vertical,1,DEADMAN,
+J8,"TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal",1,Vin,
+J9,"TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal",1,BATT %,
+"R1, R2",R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal,2,R_US,
