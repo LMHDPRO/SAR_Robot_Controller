@@ -13,6 +13,7 @@ class ArmWorkspace(MainWindow):
         self.state = {}
         self._last_draw = 0.0
         self._force_draw = True
+        self._preview_segment = None
         super().__init__()
         self.setMinimumSize(0, 0)
         self.tabs.setMinimumWidth(400)
@@ -28,6 +29,15 @@ class ArmWorkspace(MainWindow):
         self.btn_home.setToolTip('Recupera la pose inicial en la simulación. Con Live activo también la envía al brazo.')
         self.btn_send_manual.parentWidget().layout().addWidget(self.btn_home)
         self.btn_home.clicked.connect(self.return_home)
+        profile_layout = QtWidgets.QFormLayout()
+        self.motion_profile = QtWidgets.QComboBox()
+        self.motion_profile.addItem('Lineal', False)
+        self.motion_profile.addItem('Quíntico', True)
+        self.motion_profile.setToolTip('Vista articular, Home y poses de rutinas. Live y COCO mantienen el control continuo.')
+        profile_layout.addRow('Perfil articular', self.motion_profile)
+        self.btn_send_manual.parentWidget().layout().addLayout(profile_layout)
+        self.motion_profile.currentIndexChanged.connect(self.change_motion_profile)
+        self.mode_selector.currentIndexChanged.connect(self.clear_preview_segment)
         self.btn_stop_path.clicked.connect(self.stop_robot)
         self.camera_source.setText(self.engine.runtime.get('arm_camera_url', ''))
         self.camera_source.setPlaceholderText('ESP32-S3 IP or base URL, e.g. 192.168.3.17')
@@ -48,6 +58,31 @@ class ArmWorkspace(MainWindow):
     def save_camera_url(self):
         self.engine.post('arm_camera_url', self.camera_source.text().strip())
 
+    def clear_preview_segment(self):
+        self._preview_segment = None
+
+    def change_motion_profile(self):
+        self.clear_preview_segment()
+        self.engine.arm_quintic = self.motion_profile.currentData()
+
+    def _next_fk_angles(self, diff):
+        if not self.engine.arm_quintic or self.chk_live.isChecked():
+            return super()._next_fk_angles(diff)
+        if not np.any(diff):
+            self.clear_preview_segment()
+            return None
+        now = time.monotonic()
+        target = self.slider_target_fk
+        if self._preview_segment is None or not np.array_equal(target, self._preview_segment[1]):
+            # Scale duration so peak joint speed respects the preview speed setting.
+            duration = max(0.05, 1.875 * np.max(np.abs(diff)) / self.max_speed_degs)
+            self._preview_segment = (self.current_physical_angles.copy(), target.copy(), now, duration)
+        start, goal, began, duration = self._preview_segment
+        u = min(1.0, (now - began) / duration)
+        if u >= 1:
+            return goal.copy()
+        return start + (goal - start) * (u**3 * (10 + u * (-15 + 6*u)))
+
     def return_home(self):
         if self.engine.source != 'PC' or self.path_active:
             self._show_msg('Selecciona control PC y detén la trayectoria antes de volver a Home.', True)
@@ -60,9 +95,17 @@ class ArmWorkspace(MainWindow):
                 return
         self.mode_selector.setCurrentIndex(0)
         self._force_draw = True
-        self.sync_pose(self.robot.startup_angles, self.robot.home_gripper)
-        self._on_slider_changed()
-        self.robot.last_ik_theta = self.robot.convert_angles(self.current_physical_angles)
+        self.robot.last_ik_theta = self.robot.convert_angles(self.robot.startup_angles)
+        if self.engine.arm_quintic and not live:
+            goal = self.robot.startup_angles.copy()
+            for slider, angle in zip(self.fk_sliders, goal):
+                slider.setValue(round(angle * 10))
+            self.slider_pinza.setValue(round(self.robot.home_gripper))
+            self._on_slider_changed()
+            self._preview_segment = (self.current_physical_angles.copy(), goal, time.monotonic(), 2.0)
+        else:
+            self.sync_pose(self.robot.startup_angles, self.robot.home_gripper)
+            self._on_slider_changed()
         if live:
             self.engine.post('arm_home', None)
         self._show_msg('Home solicitado al AGV.' if live else 'Pose inicial en la simulación.')
@@ -95,6 +138,7 @@ class ArmWorkspace(MainWindow):
 
     def sync_pose(self,angles,gripper):
         if not self.valid_angles(angles):return
+        self.clear_preview_segment()
         self._syncing=True
         self.current_physical_angles=np.array(angles,dtype=float)
         self.current_xyz,_=self.robot.compute_fk(self.current_physical_angles)
@@ -147,7 +191,7 @@ class ArmWorkspace(MainWindow):
         grip=float(self.slider_pinza.value())
         if not 10<=grip<=75:
             self.cancel_motion();self._show_msg('Pinza fuera del rango SAR 10–75°',True);return
-        self.engine.post('arm_pose',(self.current_physical_angles.copy(),grip,150 if live_mode else 2000))
+        self.engine.post('arm_stream_pose' if live_mode else 'arm_pose',(self.current_physical_angles.copy(),grip,150 if live_mode else 2000))
         if not live_mode:self._show_msg('Pose enviada a la cola SAR; confirmar estado del firmware en la barra global.')
 
     def _control_loop_tick(self):

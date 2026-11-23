@@ -16,6 +16,8 @@ A Python/PySide6 desktop controller for a differential-drive AGV, a servo-driven
 | **LiDAR / SLAM** | Live COIN-D6 scans, raw recording and offline replay, and experimental local 2D mapping. Scan matching can use encoder and IMU motion estimates. The workspace provides range summaries, guidance back to a saved pose, and NPZ/PNG map export. See the [LiDAR and SLAM guide](LIDAR_SLAM.md). |
 | **Routines** | Build and save ordered programs with encoder/IMU moves, precision turns, waits, joint poses, XYZ poses via IK, and ArUco alignment. Global STOP cancels the running routine. |
 
+In **Brazo · V7 → Control → Perfil articular**, **Lineal** is the startup default. Select **Quíntico** to preview a rest-to-rest joint move with the FK sliders or **Home**. The selected profile also applies to physical Home, manual pose commands, and arm poses in routines, including pickup and placement. Physical quintic moves require the updated SAR_AGV firmware. Live slider commands and COCO use linear interpolation.
+
 ## Software modules
 
 | Area | Files and responsibilities |

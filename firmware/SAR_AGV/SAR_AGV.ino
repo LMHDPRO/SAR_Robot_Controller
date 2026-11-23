@@ -35,6 +35,7 @@ constexpr float ARM_POWER_POSE[ARM_SERVO_COUNT]={108.5f,149.5f,180.0f,90.0f,90.0
 float armAngles[ARM_SERVO_COUNT];
 float armStart[ARM_SERVO_COUNT],armTarget[ARM_SERVO_COUNT];
 bool armMoving=false;
+bool armQuintic=false;
 uint32_t armStartedAt=0,armDurationMs=0,lastArmWrite=0;
 uint32_t tcpRxFrames=0,tcpTxFrames=0,lastDisplay=0;
 portMUX_TYPE mux=portMUX_INITIALIZER_UNLOCKED;
@@ -80,10 +81,16 @@ void updateArmMotion(uint32_t now){
   lastArmWrite=now;
   uint32_t elapsed=now-armStartedAt;
   float fraction=elapsed>=armDurationMs?1.0f:static_cast<float>(elapsed)/armDurationMs;
+  if(armQuintic){
+    // Evaluate the second half by symmetry to retain precision near the target.
+    float u=fraction>0.5f?1.0f-fraction:fraction;
+    float s=u*u*u*(10.0f+u*(-15.0f+6.0f*u));
+    fraction=fraction>0.5f?1.0f-s:s;
+  }
   for(uint8_t channel=0;channel<ARM_SERVO_COUNT;channel++)
     armAngles[channel]=armStart[channel]+(armTarget[channel]-armStart[channel])*fraction;
   writeArmAngles();
-  if(fraction>=1.0f)armMoving=false;
+  if(elapsed>=armDurationMs)armMoving=false;
 }
 void stopArmMotion(){
   updateArmMotion(millis());
@@ -91,13 +98,13 @@ void stopArmMotion(){
   for(uint8_t channel=0;channel<ARM_SERVO_COUNT;channel++)
     armStart[channel]=armTarget[channel]=armAngles[channel];
 }
-void startArmMotion(const int* requested,uint32_t duration,uint32_t now){
+void startArmMotion(const int* requested,uint32_t duration,uint32_t now,bool quintic){
   updateArmMotion(now);
   for(uint8_t channel=0;channel<ARM_SERVO_COUNT;channel++){
     armStart[channel]=armAngles[channel];
     armTarget[channel]=static_cast<float>(requested[channel]);
   }
-  armStartedAt=now;armDurationMs=duration;armMoving=true;
+  armStartedAt=now;armDurationMs=duration;armQuintic=quintic;armMoving=true;
 }
 bool imuReady(){
   return bno&&imuReadOK&&millis()-imuReadAt<=250;
@@ -186,15 +193,16 @@ void parseCommand(){
     armed=true;timeoutActive=false;lastCommand=millis();return;
   }
   int arm[ARM_SERVO_COUNT],duration=0,armFields=0;
-  if(sscanf(rx,"ARM:%d,%d,%d,%d,%d,%d,%d%n",
+  bool quintic=strncmp(rx,"ARMQ:",5)==0;
+  if((quintic||strncmp(rx,"ARM:",4)==0)&&sscanf(rx+(quintic?5:4),"%d,%d,%d,%d,%d,%d,%d%n",
       &arm[0],&arm[1],&arm[2],&arm[3],&arm[4],&arm[5],&duration,&armFields)==7
-      &&armFields==(int)strlen(rx)&&pcaReady&&armed&&!emergencyActive()&&!estopLatched
+      &&armFields==(int)strlen(rx)-(quintic?5:4)&&pcaReady&&armed&&!emergencyActive()&&!estopLatched
       &&!timeoutActive&&duration>=100&&duration<=10000
       &&arm[0]>=0&&arm[0]<=180&&arm[1]>=0&&arm[1]<=180
       &&arm[2]>=0&&arm[2]<=180&&arm[3]>=0&&arm[3]<=180
       &&arm[4]>=0&&arm[4]<=180&&arm[5]>=10&&arm[5]<=75){
     lastCommand=millis();
-    startArmMotion(arm,static_cast<uint32_t>(duration),lastCommand);
+    startArmMotion(arm,static_cast<uint32_t>(duration),lastCommand,quintic);
     return;
   }
   int l,r,n=0;
@@ -283,7 +291,7 @@ void loop(){
         "\"tl\":%ld,\"tr\":%ld,\"pl\":%d,\"pr\":%d,\"armed\":%d,\"estop\":%d,\"pwm_ok\":%d,"
         "\"imu\":%d,\"imu_addr\":%d,\"heading_relative\":%.2f,\"heading\":%.2f,\"roll\":%.2f,\"pitch\":%.2f,"
         "\"imu_age_ms\":%lu,\"imu_read_ok\":%d,\"oled_ready\":%d,\"pca_ready\":%d,\"arm_protocol\":%u,"
-        "\"arm_busy\":%d,\"arm_angles\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+        "\"arm_quintic\":1,\"arm_busy\":%d,\"arm_angles\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
         "\"tcp_rx_frames\":%lu,\"tcp_tx_frames\":%lu,\"cs\":%d,\"cg\":%d,\"ca\":%d,\"cm\":%d}\n",
         cutRelaysOnLoss,ESTOP_PIN<0?-1:(emergencyActive()?1:0),(unsigned long)bootId,(unsigned long)++seq,
         (unsigned long)now,(long)l,(long)r,actualL,actualR,armed,estopLatched?1:0,pwmOK,bno!=nullptr,

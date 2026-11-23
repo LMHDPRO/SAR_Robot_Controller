@@ -70,6 +70,7 @@ class Engine(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True);self.signals=Signals();self.commands=queue.Queue();self.quit=False
         self.robot=self.pad=None;self.g=Geometry();self.odom=Odometry();self.telemetry={}
+        self.arm_quintic=False
         self.arm_model=ArmKinematics();self.arm_angles=self.arm_model.startup_angles.copy();self.arm_gripper=60.0;self.arm_rotation=90.0
         self.arm_target_angles=self.arm_angles.copy();self.arm_target_gripper=self.arm_gripper
         self.arm_target_rotation=self.arm_rotation
@@ -180,7 +181,7 @@ class Engine(threading.Thread):
         if self.telemetry.get('pca_ready')!=1:return 'PCA9685 not ready on AGV'
         if self.telemetry.get('arm_protocol')!=1:return 'Cargar firmware SAR con soporte del brazo'
         return ''
-    def send_arm_pose(self,angles,gripper,duration_ms,owner,rotation=None,routine_owned=False):
+    def send_arm_pose(self,angles,gripper,duration_ms,owner,rotation=None,routine_owned=False,streaming=False):
         reason=self.arm_motion_block(owner)
         if reason:raise ValueError(reason)
         if owner=='PC' and (self.live or self.primitive or (self.routine and not routine_owned) or self.capture or self.aruco_alignment):
@@ -195,7 +196,12 @@ class Engine(threading.Thread):
         if not math.isfinite(wrist_rotation) or not 0<=wrist_rotation<=180:raise ValueError('Wrist rotation angle must be between 0 and 180 degrees')
         if not 100<=duration<=10000:raise ValueError('Arm move duration must be between 100 and 10000 ms')
         channels=[int(round(target[0])),int(round(target[1])),int(round(target[2])),int(round(wrist_rotation)),int(round(target[3])),int(round(grip))]
-        self.robot.send(f"ARM:{','.join(map(str,channels))},{duration}\n")
+        command="ARM"
+        if self.arm_quintic and owner=='PC' and not streaming:
+            if self.telemetry.get('arm_quintic')!=1:
+                raise ValueError('Actualiza el firmware SAR_AGV para usar el perfil quíntico o selecciona Lineal.')
+            command="ARMQ"
+        self.robot.send(f"{command}:{','.join(map(str,channels))},{duration}\n")
         self.arm_target_angles=target.copy();self.arm_target_gripper=grip
         self.arm_target_rotation=wrist_rotation
         self.arm_model.last_ik_theta=self.arm_model.convert_angles(target)
@@ -379,10 +385,10 @@ class Engine(threading.Thread):
                 self.coco_wrist_delta=self.coco_grip_delta=self.coco_ik_budget=0.0
         except ValueError as exc:
             self.arm_error=str(exc)
-    def handle_arm_pose(self,value):
+    def handle_arm_pose(self,value,streaming=False):
         if self.arm_approach is not None:raise ValueError('STOP antes de enviar otra pose durante la secuencia')
         angles,gripper,duration=value
-        self.send_arm_pose(angles,gripper,duration,'PC')
+        self.send_arm_pose(angles,gripper,duration,'PC',streaming=streaming)
     def start_arm_approach(self):
         if self.arm_approach is not None:raise ValueError('La secuencia del brazo ya está activa')
         self.signals.cancelled.emit()
@@ -428,7 +434,10 @@ class Engine(threading.Thread):
         self.signals.cancelled.emit()
         now=time.monotonic()
         self.pickup_sequence=PickupSequence([108.5,149.4,180,6.8],now,release=release)
-        self.send_pickup_step(self.pickup_sequence.next_step(now))
+        try:self.send_pickup_step(self.pickup_sequence.next_step(now))
+        except Exception:
+            self.pickup_sequence=None
+            raise
     def halt_loss(self):
         self.distance_reference=None
         self.halt(bool(self.runtime['cut_relays_on_loss']))
@@ -528,7 +537,7 @@ class Engine(threading.Thread):
                 raise ValueError('STOP antes de volver a Home durante la secuencia')
             self.send_arm_pose(self.arm_model.startup_angles, self.arm_model.home_gripper,
                                2000, 'PC', self.arm_model.home_wrist_rotation)
-        elif k=='arm_pose':self.handle_arm_pose(v)
+        elif k in ('arm_pose','arm_stream_pose'):self.handle_arm_pose(v,streaming=k=='arm_stream_pose')
         elif k=='arm_approach':self.start_arm_approach()
         elif k=='power':
             if v and (self.estop_latched or self.telemetry.get('estop')==1):raise ValueError('Desbloquear E-STOP primero')

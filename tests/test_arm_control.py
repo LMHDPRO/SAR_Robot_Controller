@@ -17,6 +17,21 @@ class RecordingLink:
 
 
 class ArmControlTests(unittest.TestCase):
+    def test_quintic_only_applies_to_discrete_pc_commands(self):
+        engine = self.ready_engine()
+        engine.arm_quintic = True
+        with self.assertRaisesRegex(ValueError, "firmware"):
+            engine.handle("arm_home", None)
+        self.assertEqual(engine.robot.messages, [])
+        engine.telemetry["arm_quintic"] = 1
+        engine.handle("arm_home", None)
+        self.assertEqual(engine.robot.messages[-1], "ARMQ:108,150,180,90,90,60,2000\n")
+        engine.handle("arm_stream_pose", ([90]*4, 60, 150))
+        self.assertTrue(engine.robot.messages[-1].startswith("ARM:"))
+        engine.source = "COCO"
+        engine.send_arm_pose([90]*4, 60, 150, "COCO")
+        self.assertTrue(engine.robot.messages[-1].startswith("ARM:"))
+
     def ready_engine(self, owner="PC"):
         engine = Engine()
         engine.source = owner

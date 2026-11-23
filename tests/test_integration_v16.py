@@ -18,6 +18,24 @@ APP=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_quintic_home_preview_interpolates_and_stops_at_home(self):
+        with patch.object(ArmWorkspace, '_load_vision_config'):
+            arm = ArmWorkspace(Engine())
+        arm.timer.stop()
+        self.assertFalse(arm.motion_profile.currentData())
+        arm.motion_profile.setCurrentIndex(1)
+        start = np.array([85.,100.,120.,80.])
+        arm.sync_pose(start, 35)
+        with patch('arm_workspace.time.monotonic', return_value=100):
+            arm.btn_home.click()
+        for elapsed, fraction in [(0.5, 0.103515625), (1, 0.5), (2, 1)]:
+            with patch('arm_workspace.time.monotonic', return_value=100+elapsed):
+                arm._control_loop_tick()
+            expected = start + (arm.robot.startup_angles - start) * fraction
+            np.testing.assert_allclose(arm.current_physical_angles, expected)
+        self.assertTrue(arm.engine.commands.empty())
+        arm.deleteLater()
+
     def test_home_button_restores_preview_without_sending_offline(self):
         with patch.object(ArmWorkspace, '_load_vision_config'):
             arm = ArmWorkspace(Engine())

@@ -1625,10 +1625,8 @@ class MainWindow(QMainWindow):
             mode = self.mode_selector.currentIndex()
             if mode == 0 and (not self.path_active):
                 diff = self.slider_target_fk - self.current_physical_angles
-                max_step = self.max_speed_degs * 0.05
-                step = np.clip(diff, -max_step, max_step)
-                if np.any(np.abs(step) > 0.1):
-                    next_angles = self.current_physical_angles + step
+                next_angles = self._next_fk_angles(diff)
+                if next_angles is not None:
                     final_pos, matrices = self.robot.compute_fk(next_angles)
                     self.current_physical_angles = next_angles
                     self.current_xyz = final_pos
@@ -1670,6 +1668,12 @@ class MainWindow(QMainWindow):
             state_cmd = f'STATE:{x:.1f},{y:.1f},{z:.1f},0.0,0.0,{grip:.1f}'
             if self._pendant_write_line(state_cmd):
                 self.last_pendant_send_time = current_time
+
+    def _next_fk_angles(self, diff):
+        max_step = self.max_speed_degs * 0.05
+        step = np.clip(diff, -max_step, max_step)
+        if np.any(np.abs(step) > 0.1):
+            return self.current_physical_angles + step
 
     def _update_text_results(self, servo_deg, final_pos):
         ang_str = ', '.join([f'{a:.1f}' for a in servo_deg])
