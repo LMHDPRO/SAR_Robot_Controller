@@ -1,0 +1,27 @@
+Brazo_Robotico_simplificado_controller:
+  # Publish all joint states -----------------------------------
+  joint_state_controller:
+    type: joint_state_controller/JointStateController
+    publish_rate: 50
+
+  # Position Controllers --------------------------------------
+  Revolución 102_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolución 102
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolución 103_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolución 103
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolución 104_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolución 104
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolución 105_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolución 105
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolución 106_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolución 106
+    pid: {p: 100.0, i: 0.01, d: 10.0}

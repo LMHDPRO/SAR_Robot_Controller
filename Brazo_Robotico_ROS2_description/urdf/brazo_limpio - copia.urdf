@@ -1,0 +1,184 @@
+<?xml version="1.0" ?>
+<robot name="Brazo_Robotico_simplificado">
+
+<link name="base_link">
+  <inertial>
+    <origin xyz="-0.0007270858050176268 -0.0005019766628555139 0.013924638601102612" rpy="0 0 0"/>
+    <mass value="1.418433064876417"/>
+    <inertia ixx="0.004372" iyy="0.004459" izz="0.008129" ixy="-1.5e-05" iyz="1e-05" ixz="5e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="Hombro_1">
+  <inertial>
+    <origin xyz="0.0016960080250573383 -0.008785466191224627 0.03152011638798324" rpy="0 0 0"/>
+    <mass value="0.8313845534838161"/>
+    <inertia ixx="0.000962" iyy="0.001126" izz="0.000673" ixy="1.7e-05" iyz="0.000103" ixz="0.000104"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.0 0.0 -0.05675" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/Hombro_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.0 0.0 -0.05675" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/Hombro_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="Antebrazo__4__1">
+  <inertial>
+    <origin xyz="0.0601345633672561 0.012197351391211293 0.002390069808791362" rpy="0 0 0"/>
+    <mass value="0.6612384725163569"/>
+    <inertia ixx="0.000127" iyy="0.001969" izz="0.001921" ixy="-7e-06" iyz="2e-06" ixz="-6e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.013919 7e-05 -0.127026" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/Antebrazo__4__1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.013919 7e-05 -0.127026" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/Antebrazo__4__1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="Brazo_1">
+  <inertial>
+    <origin xyz="0.040972352747272456 -0.008444041626832158 -0.0007951944015303358" rpy="0 0 0"/>
+    <mass value="0.4123889856718602"/>
+    <inertia ixx="8.7e-05" iyy="0.000468" izz="0.000447" ixy="-7e-06" iyz="-2e-06" ixz="-6e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.106079 -0.000536 -0.127348" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/Brazo_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.106079 -0.000536 -0.127348" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/Brazo_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="Wrist_1">
+  <inertial>
+    <origin xyz="0.021423616346244984 -0.005445272945609633 -0.0004670798063788062" rpy="0 0 0"/>
+    <mass value="0.16883749961433217"/>
+    <inertia ixx="3.2e-05" iyy="5.8e-05" izz="4.4e-05" ixy="4e-06" iyz="1e-06" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.195879 0.00951 -0.126719" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/Wrist_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.195879 0.00951 -0.126719" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/Wrist_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="End_1">
+  <inertial>
+    <origin xyz="0.05508264159307061 0.005570835607559388 0.001842647383082957" rpy="0 0 0"/>
+    <mass value="0.3903681821760111"/>
+    <inertia ixx="0.000105" iyy="0.000558" izz="0.000632" ixy="-4.9e-05" iyz="-3e-06" ixz="-2e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.228448 0.023539 -0.126161" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/End_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.228448 0.023539 -0.126161" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="../meshes/End_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="joint_1" type="revolute">
+  <origin xyz="0.0 0.0 0.05675" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="Hombro_1"/>
+  <axis xyz="0.0 -0.0 1.0"/>
+  <limit lower="-0.2094" upper="2.9321" effort="10.0" velocity="1.0"/>
+</joint>
+
+<joint name="joint_2" type="revolute">
+  <origin xyz="-0.013919 -7e-05 0.070276" rpy="0 0 0"/>
+  <parent link="Hombro_1"/>
+  <child link="Antebrazo__4__1"/>
+  <axis xyz="0.005057 -0.999987 -0.0"/>
+  <limit lower="-0.8552" upper="2.2863" effort="10.0" velocity="1.0"/>
+</joint>
+
+<joint name="joint_3" type="revolute">
+  <origin xyz="0.119998 0.000606 0.000322" rpy="0 0 0"/>
+  <parent link="Antebrazo__4__1"/>
+  <child link="Brazo_1"/>
+  <axis xyz="-0.005057 0.999987 0.0"/>
+  <limit lower="-1.3089" upper="1.8325" effort="10.0" velocity="1.0"/>
+</joint>
+
+<joint name="joint_4" type="fixed">
+  <origin xyz="0.0898 -0.010046 -0.000629" rpy="0 0 0"/>
+  <parent link="Brazo_1"/>
+  <child link="Wrist_1"/>
+  </joint>
+
+<joint name="joint_5" type="revolute">
+  <origin xyz="0.032569 -0.014029 -0.000558" rpy="0 0 0"/>
+  <parent link="Wrist_1"/>
+  <child link="End_1"/>
+  <axis xyz="0.00492 -0.999586 -0.028363"/>
+  <limit lower="-1.8499" upper="1.2915" effort="10.0" velocity="1.0"/>
+</joint>
+
+<link name="tcp_punta_garra">
+  <visual>
+    <geometry>
+      <sphere radius="0.01"/> 
+    </geometry>
+    <material name="red">
+      <color rgba="1 0 0 1"/>
+    </material>
+  </visual>
+</link>
+
+<joint name="fix_tcp" type="fixed">
+  <parent link="End_1"/>
+  <child link="tcp_punta_garra"/>
+  <origin xyz="0.12 0 0" rpy="0 0 0"/> </joint>
+
+</robot>
