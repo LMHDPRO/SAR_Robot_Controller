@@ -8,10 +8,10 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from lidar_workspace import LidarWorkspace
 from arm import ArmKinematics
-from defaults import RUNTIME_DEFAULTS, GEOMETRY_DEFAULTS, GRIPPER_MIN_DEG, GRIPPER_MAX_DEG, LEGACY_GRIPPER_MIN_DEG
+from defaults import RUNTIME_DEFAULTS, GEOMETRY_DEFAULTS, GRIPPER_MIN_DEG, GRIPPER_MAX_DEG
 from core import Wait, distance_scale, Geometry, Odometry, Primitive, SingleEncoderMove, HeadingHold, ImuTurn, WheelCapture, wheel_correction, validate_routine
 from aruco_alignment import ArucoAlignment
-from pickup_sequence import PickupSequence
+from pickup_sequence import GRIPPER_HOLD_DEG, PickupSequence
 from routine_blocks import ArmRoutineBlock, ArucoRoutineBlock
 
 class Link:
@@ -184,9 +184,6 @@ class Engine(threading.Thread):
         if self.telemetry.get('pca_ready')!=1:return 'PCA9685 not ready on AGV'
         if self.telemetry.get('arm_protocol')!=1:return 'Cargar firmware SAR con soporte del brazo'
         return ''
-    def gripper_min_deg(self):
-        if self.telemetry.get('arm_gripper_min')==GRIPPER_MIN_DEG:return GRIPPER_MIN_DEG
-        return LEGACY_GRIPPER_MIN_DEG
     def send_arm_pose(self,angles,gripper,duration_ms,owner,rotation=None,routine_owned=False,streaming=False,*,coco_quintic=False):
         reason=self.arm_motion_block(owner)
         if reason:raise ValueError(reason)
@@ -200,8 +197,6 @@ class Engine(threading.Thread):
         duration=int(duration_ms)
         if not math.isfinite(grip) or not GRIPPER_MIN_DEG<=grip<=GRIPPER_MAX_DEG:
             raise ValueError(f'Pinza fuera del rango SAR {GRIPPER_MIN_DEG}–{GRIPPER_MAX_DEG}°')
-        if grip<self.gripper_min_deg():
-            raise ValueError(f'Actualiza el firmware SAR_AGV para mover la pinza por debajo de {LEGACY_GRIPPER_MIN_DEG}°')
         if not math.isfinite(wrist_rotation) or not 0<=wrist_rotation<=180:raise ValueError('Wrist rotation angle must be between 0 and 180 degrees')
         if not 100<=duration<=10000:raise ValueError('Arm move duration must be between 100 and 10000 ms')
         channels=[int(round(target[0])),int(round(target[1])),int(round(target[2])),int(round(wrist_rotation)),int(round(target[3])),int(round(grip))]
@@ -256,7 +251,7 @@ class Engine(threading.Thread):
         elif joint_index==4:
             angles[3]=max(0.0,min(180.0,angles[3]+delta))
         else:
-            gripper=max(self.gripper_min_deg(),min(GRIPPER_MAX_DEG,gripper+delta))
+            gripper=max(GRIPPER_MIN_DEG,min(GRIPPER_MAX_DEG,gripper+delta))
         if (np.max(np.abs(angles-self.arm_target_angles))<.5
                 and abs(rotation-self.arm_target_rotation)<.5
                 and abs(gripper-self.arm_target_gripper)<.5):
@@ -303,7 +298,7 @@ class Engine(threading.Thread):
         target_angles=self.arm_target_angles.copy()
         current_xyz=self.arm_model.compute_fk(target_angles)[0]
         gripper=self.arm_target_gripper
-        min_grip=self.gripper_min_deg()
+        min_grip=GRIPPER_MIN_DEG
         arm_mode=p.get('arm_mode','XY')
         encoder_mode=p.get('encoder_mode','Z')
         if encoder_mode not in ('Z','GRIP'):
@@ -455,8 +450,8 @@ class Engine(threading.Thread):
             raise ValueError('Detén el movimiento actual antes de recolectar')
         if release:
             channels=self.telemetry.get('arm_angles')
-            if not isinstance(channels,list) or len(channels)!=6 or not all(isinstance(a,(float,int)) and math.isfinite(a) and abs(a-b)<=1 for a,b in zip(channels,[108,149,180,90,7,10])):
-                raise ValueError('Para dejar la pieza, primero coloca el brazo en la posición segura con la pinza a 10°')
+            if not isinstance(channels,list) or len(channels)!=6 or not all(isinstance(a,(float,int)) and math.isfinite(a) and abs(a-b)<=1 for a,b in zip(channels,[108,149,180,90,7,GRIPPER_HOLD_DEG])):
+                raise ValueError(f'Para dejar la pieza, primero coloca el brazo en la posición segura con la pinza a {GRIPPER_HOLD_DEG}°')
         self.signals.cancelled.emit()
         now=time.monotonic()
         self.pickup_sequence=PickupSequence([108.5,149.4,180,6.8],now,release=release)

@@ -1,5 +1,7 @@
 """Supervised arm pickup: advance only after the firmware reports each target."""
 
+GRIPPER_HOLD_DEG = 15
+
 
 class PickupSequence:
     def __init__(self, safe_pose, now, release=False):
@@ -7,12 +9,12 @@ class PickupSequence:
         self.steps = [
             ('Approach', [110.9, 112.5, 160.5, 106.0], 75),
             ('Pick', [110.9, 71.1, 142.8, 84.7], 75),
-            ('Cerrar pinza', [110.9, 71.1, 142.8, 84.7], 10),
-            ('Volver a Approach', [110.9, 112.5, 160.5, 106.0], 10),
-            ('Volver a posición segura', safe_pose, 10),
+            ('Cerrar pinza', [110.9, 71.1, 142.8, 84.7], GRIPPER_HOLD_DEG),
+            ('Volver a Approach', [110.9, 112.5, 160.5, 106.0], GRIPPER_HOLD_DEG),
+            ('Volver a posición segura', safe_pose, GRIPPER_HOLD_DEG),
         ] if not release else [
-            ('Approach con pieza', [110.9, 112.5, 160.5, 106.0], 10),
-            ('Posición para dejar', [110.9, 71.1, 142.8, 84.7], 10),
+            ('Approach con pieza', [110.9, 112.5, 160.5, 106.0], GRIPPER_HOLD_DEG),
+            ('Posición para dejar', [110.9, 71.1, 142.8, 84.7], GRIPPER_HOLD_DEG),
             ('Abrir pinza', [110.9, 71.1, 142.8, 84.7], 75),
             ('Retirar a Approach', [110.9, 112.5, 160.5, 106.0], 75),
             ('Volver a posición segura', safe_pose, 75),

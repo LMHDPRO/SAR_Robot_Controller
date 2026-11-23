@@ -176,7 +176,7 @@ class CocoOsTests(unittest.TestCase):
         self.send()
         self.assertEqual(self.robot.messages, ['STOP\n'])
 
-    def test_gripper_uses_the_minimum_supported_by_the_agv(self):
+    def test_gripper_respects_the_minimum_even_if_firmware_allows_less(self):
         for mode in ('A', 'C'):
             with self.subTest(mode=mode):
                 self.initialize_controller()
@@ -184,16 +184,12 @@ class CocoOsTests(unittest.TestCase):
                 e.source = 'COCO'
                 self.arm_deadman(mode=mode, arm_joint_index=5, encoder_mode='GRIP',
                                  arm_speed_level=2)
-                e.arm_target_gripper = 10
-                for _ in range(3):
-                    self.send(arm_filtered_y=-100 if mode=='A' else 0, grip_change_pct=-20)
-                self.assertEqual(e.arm_target_gripper, 10)
-
-                e.telemetry['arm_gripper_min'] = 5
+                e.arm_target_gripper = 11
+                e.telemetry['arm_gripper_min'] = 0
                 for _ in range(5):
-                    self.send(grip_change_pct=-40)
-                self.assertEqual(e.arm_target_gripper, 5)
-                self.assertEqual(self.robot.messages[-1].split(',')[-2], '5')
+                    self.send(arm_filtered_y=-100 if mode=='A' else 0, grip_change_pct=-40)
+                self.assertGreaterEqual(e.arm_target_gripper, 10)
+                self.assertEqual(self.robot.messages[-1].split(',')[-2], '10')
 
     def test_pad_reconnect_requires_new_deadman_edge_even_with_same_boot(self):
         e = self.engine

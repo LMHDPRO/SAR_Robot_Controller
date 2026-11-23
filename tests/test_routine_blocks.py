@@ -18,7 +18,7 @@ class RoutineBlockTests(unittest.TestCase):
     def test_validation_mixes_blocks_and_rejects_unsafe_values(self):
         blocks=validate_routine([['distance',10],['arm',self.value],['wait',1],['aruco',None]])
         self.assertEqual([item[0] for item in blocks],['distance','arm','wait','aruco'])
-        with self.assertRaises(ValueError):validate_routine([['arm',dict(self.value,gripper=2)]])
+        with self.assertRaisesRegex(ValueError,'10–75'):validate_routine([['arm',dict(self.value,gripper=9)]])
         with self.assertRaises(ValueError):validate_routine([['arm_xyz',dict(self.value,xyz=[0,float('nan'),2])]])
 
     def test_arm_block_waits_for_busy_and_matching_telemetry(self):

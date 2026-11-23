@@ -342,8 +342,10 @@ def validate_routine(steps):
             grip=value.get('gripper');rotation=value.get('rotation');duration=value.get('duration_ms')
             if any(isinstance(x,bool) or not isinstance(x,(int,float)) or not math.isfinite(x) for x in (grip,rotation,duration)):
                 raise ValueError('Pinza, rotación o duración inválidas')
-            if not GRIPPER_MIN_DEG<=grip<=GRIPPER_MAX_DEG or not 0<=rotation<=180 or not 100<=duration<=10000 or int(duration)!=duration:
-                raise ValueError('Pinza, rotación o duración fuera de rango')
+            if not GRIPPER_MIN_DEG<=grip<=GRIPPER_MAX_DEG:
+                raise ValueError(f'Pinza fuera del rango SAR {GRIPPER_MIN_DEG}–{GRIPPER_MAX_DEG}°')
+            if not 0<=rotation<=180 or not 100<=duration<=10000 or int(duration)!=duration:
+                raise ValueError('Rotación o duración fuera de rango')
             result.append((kind,{key:list(values),'gripper':grip,'rotation':rotation,'duration_ms':int(duration)}));continue
         if kind in ('aruco','pickup','release'):
             if value is not None:raise ValueError(f'{kind} requires no parameters')

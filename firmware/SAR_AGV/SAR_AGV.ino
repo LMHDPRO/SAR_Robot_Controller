@@ -31,7 +31,7 @@ Adafruit_SSD1306 oled(128,64,&Wire,-1);
 Adafruit_PWMServoDriver pca(PCA_ADDR, Wire);
 bool oledReady=false,pcaReady=false;
 constexpr uint8_t ARM_SERVO_COUNT=6;
-constexpr int GRIPPER_MIN_DEG=5,GRIPPER_MAX_DEG=75;
+constexpr int GRIPPER_MIN_DEG=10,GRIPPER_MAX_DEG=75;
 constexpr float ARM_POWER_POSE[ARM_SERVO_COUNT]={108.5f,149.5f,180.0f,90.0f,90.0f,60.0f};
 float armAngles[ARM_SERVO_COUNT];
 float armStart[ARM_SERVO_COUNT],armTarget[ARM_SERVO_COUNT];
