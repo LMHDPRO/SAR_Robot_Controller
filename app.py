@@ -54,6 +54,7 @@ class Link:
         except OSError:pass
 
 class Signals(QtCore.QObject):
+    coco_reference_requested=QtCore.Signal(object)
     cancelled=QtCore.Signal()
     state=QtCore.Signal(object)
     message=QtCore.Signal(str)
@@ -82,6 +83,13 @@ class Engine(threading.Thread):
         self.coco_arm_ready_at=0.0
         self.coco_joint_index=None;self.coco_joint_delta=0.0
         self.coco_wrist_delta=0.0;self.coco_grip_delta=0.0;self.coco_z_delta=0.0;self.coco_ik_budget=0.0
+        self.sequence_owner='PC'
+        self.joint_ticks_previous=0
+        self.coco_home_started=None
+        self.coco_action_id=None
+        self.coco_action_status='IDLE'
+        self.pick_after_alignment=False
+        self.pick_wait_at=None
         self.coco_owner_ack=None;self.coco_turn=None;self.coco_turn_state='IDLE';self.coco_turn_ready=False
         self.coco_turn_progress=0.0
         self.last_robot=self.last_pad=0;self.pad_data={};self.pad_base=None;self.pad_released=False;self.pad_authorized=False
@@ -142,9 +150,9 @@ class Engine(threading.Thread):
             self.emit(f'{which}: conectado; movimiento requiere una orden nueva')
 
     def emit(self,text):self.signals.message.emit(text)
-    def motion_block(self):
+    def motion_block(self,owner='PC'):
         if self.estop_latched or self.telemetry.get('estop')==1:return 'E-STOP enclavado: desbloquear primero'
-        if self.source!='PC':return 'Select PC to use screen controls'
+        if self.source!=owner:return f'Select {owner} to use screen controls'
         if not self.robot:return 'AGV disconnected'
         if time.monotonic()-self.last_robot>=.5:return 'AGV telemetry stale; reconnect AGV'
         if self.telemetry.get('estop')==1:return 'Robot emergency stop is active'
@@ -157,6 +165,11 @@ class Engine(threading.Thread):
     def halt(self,disarm=False):
         if self.coco_turn is not None and self.coco_turn_state=='RUN':self.coco_turn_state='CANCEL'
         self.coco_turn_ready=False
+        if self.sequence_owner=='COCO' and self.coco_action_status=='RUN':self.coco_action_status='STOP'
+        self.coco_home_started=None
+        self.sequence_owner='PC'
+        self.pick_after_alignment=False
+        self.pick_wait_at=None
         self.arm_approach=None
         self.collection_sequence=None
         self.pickup_sequence=None
@@ -238,12 +251,19 @@ class Engine(threading.Thread):
         if not isinstance(axis,(int,float)) or not math.isfinite(axis):
             self.arm_error='Invalid COCO arm joystick data'
             return
-        elapsed=0.0 if self.coco_arm_at is None else min(.1,max(0.0,now-self.coco_arm_at))
-        self.coco_arm_at=now
-        if joint_index!=self.coco_joint_index or not axis:self.coco_joint_delta=0.0
-        self.coco_joint_index=joint_index
-        speed=COCO_ARM_SPEED[coco_level(p.get('arm_speed_level'),2)]
-        self.coco_joint_delta+=max(-100.0,min(100.0,float(axis)))/100.0*30.0*elapsed*speed
+        if 'joint_ticks' in p:
+            ticks=p['joint_ticks']
+            if type(ticks) is not int or type(self.joint_ticks_previous) is not int:return
+            if self.coco_joint_index!=joint_index:self.coco_joint_delta=0
+            self.coco_joint_index=joint_index
+            self.coco_joint_delta+=ticks-self.joint_ticks_previous
+        else:
+            elapsed=0.0 if self.coco_arm_at is None else min(.1,max(0.0,now-self.coco_arm_at))
+            self.coco_arm_at=now
+            if joint_index!=self.coco_joint_index or not axis:self.coco_joint_delta=0.0
+            self.coco_joint_index=joint_index
+            speed=COCO_ARM_SPEED[coco_level(p.get('arm_speed_level'),2)]
+            self.coco_joint_delta+=max(-100.0,min(100.0,float(axis)))/100.0*30.0*elapsed*speed
         delta=self.coco_joint_delta
         if abs(delta)<.5:return
         angles=self.arm_target_angles.copy()
@@ -415,10 +435,10 @@ class Engine(threading.Thread):
         if self.arm_approach is not None:raise ValueError('STOP antes de enviar otra pose durante la secuencia')
         angles,gripper,duration=value
         self.send_arm_pose(angles,gripper,duration,'PC',streaming=streaming)
-    def start_arm_approach(self):
+    def start_arm_approach(self,owner="PC"):
         if self.arm_approach is not None:raise ValueError('La secuencia del brazo ya está activa')
         self.signals.cancelled.emit()
-        self.send_arm_pose([90,126,74,106],75,3000,'PC',90)
+        self.send_arm_pose([90,126,74,106],75,3000,owner,90)
         self.arm_approach={'started':time.monotonic(),'seen_busy':False}
     def update_arm_approach(self,channels,busy,now):
         sequence=self.arm_approach
@@ -427,7 +447,7 @@ class Engine(threading.Thread):
         if (sequence['seen_busy'] and not busy and now-sequence['started']>=3.0
                 and all(abs(float(a)-b)<=1 for a,b in zip(channels,[90,126,74,90,106,75]))):
             self.arm_approach=None
-            self.send_arm_pose([108.5,149.4,180,6.8],75,3000,'PC',90)
+            self.send_arm_pose([108.5,149.4,180,6.8],75,3000,self.sequence_owner,90)
             if self.collection_sequence is not None:
                 self.collection_sequence.update(stage='second',started=now,seen_busy=False)
             self.emit('Segunda etapa de aproximación enviada')
@@ -437,21 +457,30 @@ class Engine(threading.Thread):
         if busy:sequence['seen_busy']=True
         if (sequence['seen_busy'] and not busy and now-sequence['started']>=3
                 and all(abs(float(a)-b)<=1 for a,b in zip(channels,[108,149,180,90,7,75]))):
-            reason=self.motion_block()
+            reason=self.motion_block(self.sequence_owner)
             if reason:raise ValueError(reason)
+            self.pick_after_alignment=True
             ref=sequence['reference'];self.collection_sequence=None
             self.aruco_sample=None
             self.aruco_alignment=ArucoAlignment(ref,now,self.min_pwm,require_orientation=True,require_new_sample=True);self.stopped=False
             self.emit('Brazo preparado; esperando lectura del ArUco para aproximar el AGV')
+    def update_aligned_pick(self,now):
+        if self.pick_wait_at is not None:
+            if now-self.pick_wait_at>3:
+                self.halt();self.emit('PICK cancelado: sin confirmación de parada del AGV')
+            elif self.last_robot>self.pick_wait_at and self.sent_pwm==(0,0) and self.telemetry.get('pl')==self.telemetry.get('pr')==0:
+                self.pick_wait_at=None
+                self.start_pickup(owner=self.sequence_owner)
+
     def send_pickup_step(self,step):
         name,joints,gripper=step
-        self.send_arm_pose(joints,gripper,3000,'PC',90,routine_owned=self.routine_running)
+        self.send_arm_pose(joints,gripper,3000,self.sequence_owner,90,routine_owned=self.routine_running)
         action='Entrega' if self.pickup_sequence and self.pickup_sequence.release else 'Recolección'
         self.emit(f'{action}: {name}; STOP cancela')
-    def start_pickup(self,release=False):
-        reason=self.arm_motion_block('PC')
+    def start_pickup(self,release=False,owner='PC'):
+        reason=self.arm_motion_block(owner)
         if reason:raise ValueError(reason)
-        if self.arm_busy or self.live or self.primitive or (self.routine and not self.routine_running) or self.capture or self.aruco_alignment or self.collection_sequence or self.arm_approach or self.pickup_sequence:
+        if self.pick_wait_at is not None or self.arm_busy or self.live or self.primitive or (self.routine and not self.routine_running) or self.capture or self.aruco_alignment or self.collection_sequence or self.arm_approach or self.pickup_sequence:
             raise ValueError('Detén el movimiento actual antes de recolectar')
         if release:
             channels=self.telemetry.get('arm_angles')
@@ -534,12 +563,22 @@ class Engine(threading.Thread):
             self.start_pickup();return
         if k=='release_start':
             self.start_pickup(release=True);return
-        if k=='aruco_sequence':
-            reason=self.motion_block()
+        if k=='coco_reference':
+            key,ref,error=v
+            if self.sequence_owner!='COCO' or self.coco_action_id!=key or not self.pad_authorized:return
+            now=time.monotonic()
+            if now-self.last_pad>.5 or now-self.last_ui>.6:
+                self.halt_loss();return
+            if error:
+                self.halt();self.coco_action_status='CHECK PC';self.emit(error)
+                return
+            v=ref
+        if k in ('aruco_sequence','coco_reference'):
+            reason=self.motion_block('COCO' if k=='coco_reference' else 'PC')
             if reason:raise ValueError(reason)
             if self.live or self.primitive or self.routine or self.capture or self.aruco_alignment or self.collection_sequence or self.arm_approach or self.pickup_sequence:
                 raise ValueError('Detén el movimiento actual')
-            self.start_arm_approach()
+            self.start_arm_approach(self.sequence_owner)
             self.collection_sequence={'stage':'first','reference':v,'started':time.monotonic()}
             self.emit('Secuencia ArUco: preparando brazo; STOP cancela')
             return
@@ -551,7 +590,7 @@ class Engine(threading.Thread):
             self.aruco_alignment=ArucoAlignment(v,now,self.min_pwm,require_orientation=True);self.stopped=False
             self.emit('Alineación ArUco iniciada; esperando marcador válido. STOP cancela')
             return
-        if (self.aruco_alignment or self.collection_sequence or self.pickup_sequence) and k not in ('stop','estop'):
+        if (self.pick_wait_at is not None or self.aruco_alignment or self.collection_sequence or self.pickup_sequence) and k not in ('stop','estop'):
             raise ValueError('STOP antes de iniciar otro movimiento o cambiar configuración')
         if k=='arm_camera_url':self.runtime['arm_camera_url']=str(v);self.save_runtime()
         elif k=='connect_robot':self.request_link('robot',v)
@@ -806,6 +845,8 @@ class Engine(threading.Thread):
                 f"AGV:{(self.odom.left+self.odom.right)/20:.2f},{math.degrees(self.odom.yaw):.2f},{self.odom.v:.2f},{t.get('tl',0)},{t.get('tr',0)},{int(t.get('imu',0))}",
                 f'YAW:{self.odom.imu_yaw:.2f},{self.turn_delta:.2f},{self.odom.imu_yaw/360:.4f},{int(fresh and self.coco_imu_ready(now))}']
         if self.pad_data.get('coco_os')==11:
+            frames.append(f"ESTOP:{int(bool(self.estop_latched or t.get('estop')))}")
+            frames.append('ACTION:'+self.coco_action_status)
             frames.extend((f'COCO11:{int(pose)},{pwm_l:.0f},{pwm_r:.0f}',
                            f'TURN:{self.coco_turn_state},{target:.0f},{self.coco_turn_progress:.1f}'))
             if 'arm_ik_method' in self.pad_data:
@@ -828,12 +869,19 @@ class Engine(threading.Thread):
             return
 
         restarted = bool(previous and p.get('boot_id') != previous.get('boot_id'))
+        self.joint_ticks_previous=(previous.get('joint_ticks',0)
+                                   if previous.get('joint_selection')==p.get('joint_selection') else 0)
         self.pad_data = dict(p)
         self.last_pad = now
         modern = p.get('coco_os')==11
         axes = [p.get(key, 0) for key in ('agv_filtered_x','agv_filtered_y','arm_filtered_x','arm_filtered_y')]
         centered = all(isinstance(value,(int,float)) and abs(value)<=10 for value in axes)
         pair = (p.get('boot_id'), p.get('power_request_id', 0))
+        if p.get('estop_request')==1:
+            if not self.estop_latched or self.reset_pending:
+                self.epoch+=1
+                self.handle('estop',None)
+            return
         if restarted:
             if self.source == 'COCO':
                 self.halt(False)
@@ -856,7 +904,7 @@ class Engine(threading.Thread):
             return
 
         if self.estop_latched or self.telemetry.get('estop')==1:
-            self.halt(True);return
+            return
         if now-self.last_ui>.6:
             self.halt_loss();return
 
@@ -910,6 +958,33 @@ class Engine(threading.Thread):
             self.halt()
             return
 
+        action=p.get('action')
+        if action in ('HOME','PICK','UNPICK','ARUCO'):
+            key=(p.get('boot_id'),p.get('action_id'))
+            if key==self.coco_action_id:return
+            if self.sequence_owner=='COCO' or type(key[0]) is not int or type(key[1]) is not int:
+                self.halt();return
+            self.coco_action_id=key
+            try:
+                if not centered or self.live or self.primitive or self.arm_busy or self.sent_pwm!=(0,0) or self.telemetry.get('pl') or self.telemetry.get('pr'):
+                    raise ValueError('Centra los mandos y espera a que se detenga el robot')
+                reason=self.arm_motion_block('COCO')
+                if reason:raise ValueError(reason)
+                self.sequence_owner='COCO'
+                self.coco_action_status='RUN'
+                if action=='ARUCO':
+                    self.signals.coco_reference_requested.emit(key)
+                elif action=='HOME':
+                    self.send_arm_pose(self.arm_model.startup_angles,self.arm_model.home_gripper,
+                                       2000,'COCO',self.arm_model.home_wrist_rotation)
+                    self.coco_home_started=now
+                else:self.start_pickup(release=action=='UNPICK',owner='COCO')
+            except ValueError as exc:
+                self.halt();self.coco_action_status='CHECK PC';self.emit(str(exc))
+            return
+        if self.sequence_owner=='COCO':
+            self.halt()
+            return
         drive = p.get('drive', 0)
         steer = p.get('steer', 0)
         if drive not in (-1, 0, 1) or steer not in (-1, 0, 1):
@@ -976,7 +1051,7 @@ class Engine(threading.Thread):
                             if self.reset_pending and t.get('estop')==0:
                                 self.reset_pending=False;self.estop_latched=False;self.emit('E-STOP desbloqueado; alimentación OFF')
                             if t.get('estop')==1 and not self.estop_latched:
-                                self.estop_latched=True;self.halt(True)
+                                self.estop_latched=True;self.halt(True);self.emit('E-STOP activo en el AGV')
                             self.last_boot=t['boot_id'];self.last_robot=time.monotonic();self.telemetry=t
                             arm_channels=t.get('arm_angles')
                             if (isinstance(arm_channels,list) and len(arm_channels)==6
@@ -985,6 +1060,13 @@ class Engine(threading.Thread):
                                 self.arm_rotation=float(arm_channels[3])
                                 self.arm_gripper=float(arm_channels[5])
                                 self.arm_busy=bool(t.get('arm_busy',0))
+                                if self.coco_home_started is not None:
+                                    elapsed=self.last_robot-self.coco_home_started
+                                    target=pickup_servo_target(self.arm_model.startup_angles,self.arm_model.home_gripper)
+                                    if elapsed>=2 and not self.arm_busy and all(abs(a-b)<=1 for a,b in zip(arm_channels,target)):
+                                        self.coco_home_started=None;self.coco_action_status='DONE'
+                                    elif elapsed>5:
+                                        self.halt();self.emit('HOME sin confirmar en telemetría')
                                 self.update_arm_approach(arm_channels,self.arm_busy,time.monotonic())
                                 self.update_collection_sequence(arm_channels,self.arm_busy,time.monotonic())
                                 if not self.arm_busy:
@@ -1026,11 +1108,13 @@ class Engine(threading.Thread):
                 self.auto_retry_aruco_routine(now)
                 if self.aruco_alignment:
                     try:
-                        reason=self.motion_block()
+                        reason=self.motion_block(self.sequence_owner)
                         if reason:raise RuntimeError(reason)
                         if not self.odom.imu_valid:
                             l,r=0,0;status='Esperando IMU válida; AGV detenido'
                         else:
+                            if self.aruco_sample and self.aruco_sample.get('identity')!=self.aruco_alignment.ref.get('identity'):
+                                raise ValueError('La cámara o su configuración cambió durante la alineación')
                             l,r=self.aruco_alignment.output(self.aruco_sample,now,self.odom)
                             sample=self.aruco_alignment.last_valid_sample
                             status=('Buscando ArUco; AGV detenido' if not sample or now-sample['captured_at']>.5
@@ -1038,7 +1122,13 @@ class Engine(threading.Thread):
                         if status!=self.aruco_status:
                             self.aruco_status=status;self.emit(status)
                         if self.aruco_alignment.done:
-                            message=self.aruco_alignment.message;self.halt();self.test_result=message;self.emit(message)
+                            message=self.aruco_alignment.message
+                            if self.pick_after_alignment:
+                                self.aruco_alignment=None;self.pick_after_alignment=False
+                                self.pick_wait_at=now;self.stopped=True
+                                message='ArUco alineado. Esperando PWM cero para iniciar PICK.'
+                            else:self.halt()
+                            self.test_result=message;self.emit(message)
                     except (RuntimeError,ValueError,KeyError,TypeError) as e:
                         self.halt();self.test_result='Alineación detenida: '+str(e);self.emit(self.test_result);l=r=0
                 if self.robot and self.telemetry.get('armed') and now-self.last_robot<=0.5 and now-self.last_ui<=.6 and not self.estop_latched and self.telemetry.get('protocol')==1:
@@ -1099,9 +1189,10 @@ class Engine(threading.Thread):
                     self.halt();self.emit('Secuencia cancelada: primera etapa sin confirmación de telemetría')
                 if self.collection_sequence is not None and now-self.collection_sequence['started']>5:
                     self.halt();self.emit('Secuencia cancelada: brazo sin confirmación de telemetría')
+                self.update_aligned_pick(now)
                 if self.pickup_sequence is not None:
                     try:
-                        reason=self.arm_motion_block('PC')
+                        reason=self.arm_motion_block(self.sequence_owner)
                         if reason:raise RuntimeError(reason)
                         channels=self.telemetry.get('arm_angles')
                         if not isinstance(channels,list) or len(channels)!=6 or not all(isinstance(v,(int,float)) and math.isfinite(v) for v in channels):
@@ -1113,6 +1204,7 @@ class Engine(threading.Thread):
                         if step:self.send_pickup_step(step)
                         elif self.pickup_sequence.done:
                             released=self.pickup_sequence.release;self.pickup_sequence=None
+                            if self.sequence_owner=='COCO':self.coco_action_status='DONE'
                             if self.routine_running:
                                 self.stopped=True;self.next_step_at=now+0.5
                                 if not self.routine:
@@ -1359,6 +1451,7 @@ class Window(QtWidgets.QMainWindow):
         self.arm_send_button.setToolTip('Envía una pose puntual desde el panel Brazo; no es el control Live.')
         self.cameras=CamerasPage()
         self.cameras.panels[0].preview_frame.connect(self.update_routine_camera_preview)
+        self.engine.signals.coco_reference_requested.connect(self.coco_reference)
         self.cameras.panels[0].marker_sample.connect(lambda sample:self.engine.post('aruco_sample',sample))
         self.cameras.panels[0].sequence_requested.connect(lambda ref:self.engine.post('aruco_sequence',ref))
         self.cameras.panels[0].alignment_requested.connect(lambda ref:self.engine.post('aruco_start',ref))
@@ -1390,6 +1483,13 @@ class Window(QtWidgets.QMainWindow):
     @staticmethod
     def button(layout,text,fn):
         b=QtWidgets.QPushButton(text);layout.addWidget(b);b.clicked.connect(lambda checked=False:fn());return b
+    @QtCore.Slot(object)
+    def coco_reference(self,key):
+        try:ref=self.cameras.panels[0].get_alignment_reference()
+        except (OSError,ValueError,KeyError,TypeError) as exc:
+            self.engine.post('coco_reference',(key,None,str(exc)))
+        else:self.engine.post('coco_reference',(key,ref,None))
+
     def message(self,text):self.notice.setText(text);self.log.appendPlainText(text)
     def global_stop(self,kind='stop',value=None):
         self.holding=False

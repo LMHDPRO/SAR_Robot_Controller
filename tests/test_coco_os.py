@@ -49,6 +49,75 @@ class CocoOsTests(unittest.TestCase):
         self.send(deadman=0, motion_enabled=0, **values)
         self.send(deadman=1, motion_enabled=1)
 
+    def test_joint_encoder_moves_one_degree_without_joystick_drift(self):
+        e=self.engine
+        e.source='COCO'
+        self.arm_deadman(mode='A',arm_joint_index=3,joint_selection=1,joint_ticks=0)
+        self.send(arm_filtered_y=100)
+        self.assertFalse(any(m.startswith('ARM:') for m in self.robot.messages))
+        initial=e.arm_target_rotation
+        self.send(joint_ticks=3)
+        self.assertEqual(e.arm_target_rotation,initial+3)
+        count=len(self.robot.messages)
+        self.send()
+        self.assertEqual(len(self.robot.messages),count)
+        self.send(arm_joint_index=1,joint_selection=2,joint_ticks=0)
+        self.assertEqual(len(self.robot.messages),count)
+
+    def test_pad_estop_has_priority_even_with_pc_owner(self):
+        self.send(menu_open=1,owner_pending=1,estop_request=1)
+        self.assertTrue(self.engine.estop_latched)
+        self.assertIn('ESTOP\n',self.robot.messages)
+        self.assertIn('ESTOP:1\n',self.engine.coco_state_frame(self.now))
+
+    def test_menu_pick_runs_once_and_deadman_release_cancels(self):
+        e=self.engine
+        e.source='COCO'
+        self.arm_deadman(action='PICK',action_id=1)
+        sequence=e.pickup_sequence
+        self.assertIsNotNone(sequence)
+        self.send()
+        self.assertIs(e.pickup_sequence,sequence)
+        self.send(deadman=0,motion_enabled=0)
+        self.assertIsNone(e.pickup_sequence)
+        self.arm_deadman(action='UNPICK',action_id=2)
+        self.assertIsNone(e.pickup_sequence)
+        self.assertEqual(e.coco_action_status,'CHECK PC')
+
+    def test_aruco_request_uses_camera_reference_and_preserves_deadman(self):
+        e=self.engine
+        e.source='COCO'
+        requests=[]
+        e.signals.coco_reference_requested.connect(requests.append)
+        self.arm_deadman(action='ARUCO',action_id=2)
+        self.assertEqual(requests,[(123,2)])
+        ref={'xyz_camera_mm':[0,0,210.1],'rvec':[0,0,0]}
+        e.handle('coco_reference',(requests[0],ref,None))
+        self.assertEqual(e.collection_sequence['reference'],ref)
+        self.send()
+        self.assertEqual(e.sequence_owner,'COCO')
+        self.send(deadman=0,motion_enabled=0)
+        self.assertIsNone(e.collection_sequence)
+        e.handle('coco_reference',(requests[0],ref,None))
+        self.assertIsNone(e.collection_sequence)
+
+    def test_aruco_handoff_requires_new_zero_pwm_and_runs_only_once(self):
+        e=self.engine
+        e.pick_wait_at=self.now
+        e.last_robot=self.now-.1
+        e.update_aligned_pick(self.now)
+        self.assertIsNone(e.pickup_sequence)
+        e.last_robot=self.now+.1
+        e.telemetry.update(pl=0,pr=10)
+        e.update_aligned_pick(self.now+.1)
+        self.assertIsNone(e.pickup_sequence)
+        e.telemetry['pr']=0
+        e.update_aligned_pick(self.now+.2)
+        sequence=e.pickup_sequence
+        self.assertIsNotNone(sequence)
+        e.update_aligned_pick(self.now+.3)
+        self.assertIs(e.pickup_sequence,sequence)
+
     def test_handoff_acknowledges_and_rearms_in_both_directions(self):
         e = self.engine
         e.live = (85, 85)

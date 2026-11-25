@@ -128,7 +128,7 @@ class CameraPanel(QtWidgets.QGroupBox):
             pose.clicked.connect(self.approach_pose_requested.emit);advanced_layout.addWidget(pose)
             teach=QtWidgets.QPushButton('Guardar referencia ArUco 12');teach.clicked.connect(self.save_reference);advanced_layout.addWidget(teach)
             alignment=QtWidgets.QHBoxLayout();box.addLayout(alignment)
-            align=QtWidgets.QPushButton('Iniciar secuencia ArUco');align.clicked.connect(self.start_alignment);alignment.addWidget(align)
+            align=QtWidgets.QPushButton('Iniciar secuencia ArUco');align.setToolTip('Prepara el brazo, alinea el AGV e inicia PICK al confirmar PWM cero.');align.clicked.connect(self.start_alignment);alignment.addWidget(align)
             resume=QtWidgets.QPushButton('Continuar alineación');resume.clicked.connect(self.continue_alignment);alignment.addWidget(resume)
             stop_alignment=QtWidgets.QPushButton('STOP AGV');stop_alignment.clicked.connect(self.alignment_stop.emit);alignment.addWidget(stop_alignment)
             pickup=QtWidgets.QPushButton('PICK');pickup.clicked.connect(self.pickup_requested.emit);box.addWidget(pickup)
@@ -216,7 +216,7 @@ class CameraPanel(QtWidgets.QGroupBox):
             if sequence:self.sequence_requested.emit(ref)
             else:self.alignment_requested.emit(ref)
             note=' Referencia ajustada al tamaño actual del marcador; verifica la medida física.' if rescaled else ''
-            self.alignment_status.setText(('Secuencia solicitada: brazo y acercamiento.' if sequence else 'Continuar alineación solicitado; el brazo no se mueve.')+' STOP cancela.'+note)
+            self.alignment_status.setText(('Secuencia solicitada: preparar brazo, alinear y ejecutar PICK.' if sequence else 'Continuar alineación solicitado; el brazo no se mueve.')+' STOP cancela.'+note)
         except (OSError,ValueError,KeyError,TypeError) as exc:self.alignment_status.setText('No se inició: '+str(exc))
     def select_calibration(self):
         path,_=QtWidgets.QFileDialog.getOpenFileName(self,'Calibración de esta cámara','','NumPy (*.npz)')
