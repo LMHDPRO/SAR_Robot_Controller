@@ -1,10 +1,11 @@
 import unittest
+import math
 import numpy as np
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from aruco_alignment import ArucoAlignment
+from aruco_alignment import ArucoAlignment, TARGET_DISTANCE_MM
 from app import Engine
 
 
@@ -19,7 +20,7 @@ class AlignmentTests(unittest.TestCase):
     def test_turns_towards_reference_using_measured_signs(self):
         self.assertEqual(self.controller.output(self.sample([-72.1,83.5,191.1]),10.),(80,-80))
         other=ArucoAlignment(self.ref,10.,80)
-        self.assertEqual(other.output(self.sample([-72.3,20.,187.]),10.),(-80,80))
+        self.assertEqual(other.output(self.sample([-72.3,20.,205.]),10.),(-80,80))
 
     def test_missing_stale_and_near_pose_stop(self):
         self.assertEqual(self.controller.output(None,10.),(0,0))
@@ -51,7 +52,7 @@ class AlignmentTests(unittest.TestCase):
         self.assertEqual(self.controller.output(self.sample([-72.,53.,280.],11.2),11.2),(0,0))
         self.assertEqual(self.controller.output(self.sample([-72.,53.,280.],11.6),11.6),(90,90))
 
-    def test_target_is_180mm_and_near_pulses_are_shorter(self):
+    def test_target_uses_calibrated_camera_distance_and_short_near_pulses(self):
         far=self.sample([-72.,53.,280.])
         self.controller.output(far,10.)
         self.assertAlmostEqual(self.controller.until-10.,.30)
@@ -59,10 +60,24 @@ class AlignmentTests(unittest.TestCase):
         near.output(self.sample([-72.,40.,205.]),10.)
         self.assertAlmostEqual(near.until-10.,.10)
         arrival=ArucoAlignment(self.ref,10.,80)
-        target=(np.array(self.ref['xyz_camera_mm'])*180/np.linalg.norm(self.ref['xyz_camera_mm'])).tolist()
+        target=(np.array(self.ref['xyz_camera_mm'])*210.1/np.linalg.norm(self.ref['xyz_camera_mm'])).tolist()
         for now in (10.,10.1,10.2,10.3):
-            arrival.output(self.sample(target,now),now)
+            self.assertEqual(arrival.output(self.sample(target,now),now),(0,0))
         self.assertTrue(arrival.done)
+        too_close=ArucoAlignment(self.ref,10.,80)
+        old_target=(np.array(self.ref['xyz_camera_mm'])*180/np.linalg.norm(self.ref['xyz_camera_mm'])).tolist()
+        with self.assertRaisesRegex(RuntimeError,'Demasiado cerca'):
+            too_close.output(self.sample(old_target),10.)
+
+    def test_centered_pickup_reference_overrides_default_distance_and_bearing(self):
+        centered = [-61.7, -29.0, 165.2]
+        reference = dict(self.ref, xyz_camera_mm=centered, target_distance_mm=178.7)
+        alignment = ArucoAlignment(reference, 10., 80)
+        self.assertEqual(alignment.output(self.sample([-59.6, 29.6, 198.8]), 10.), (80, -80))
+        alignment = ArucoAlignment(reference, 10., 80)
+        for now in (10., 10.1, 10.2, 10.3):
+            self.assertEqual(alignment.output(self.sample(centered, now), now), (0, 0))
+        self.assertTrue(alignment.done)
 
     def test_forward_uses_odometry_limit_and_stops_on_imu_loss(self):
         odom=SimpleNamespace(left=0.,right=0.,imu_yaw=0.,imu_valid=True,imu_segment=1,revision=1)
@@ -77,15 +92,61 @@ class AlignmentTests(unittest.TestCase):
         self.assertEqual(other.output(self.sample([-72.,53.,345.],10.2),10.2,odom),(0,0))
 
     def test_completion_requires_fresh_samples_and_orientation(self):
-        target=(np.array(self.ref['xyz_camera_mm'])*180/np.linalg.norm(self.ref['xyz_camera_mm'])).tolist()
+        target=(np.array(self.ref['xyz_camera_mm'])*TARGET_DISTANCE_MM/np.linalg.norm(self.ref['xyz_camera_mm'])).tolist()
         for now in (10.,10.1,10.2,10.3):self.controller.output(self.sample(target,timestamp=now),now)
         self.assertTrue(self.controller.done)
         controller=ArucoAlignment(self.ref,10.,80)
-        for now in (10.,10.1,10.2):controller.output(self.sample(target,timestamp=now,rvec=[0.,0.,.5]),now)
-        with self.assertRaisesRegex(RuntimeError,'orientación'):controller.output(self.sample(target,timestamp=10.3,rvec=[0.,0.,.5]),10.3)
+        rotated_marker=[0.,0.,math.radians(93)]
+        for now in (10.,10.1,10.2):controller.output(self.sample(target,timestamp=now,rvec=rotated_marker),now)
+        with self.assertRaisesRegex(RuntimeError,r'Centrado horizontal [+-]0\.0°; orientación del marcador difiere 93\.0°'):
+            controller.output(self.sample(target,timestamp=10.3,rvec=rotated_marker),10.3)
+        self.assertFalse(controller.done)
+
+    def test_final_alignment_corrects_two_degree_error_with_short_pulse(self):
+        reference = dict(self.ref, xyz_camera_mm=[0, 0, 218.4], target_distance_mm=218.4)
+        alignment = ArucoAlignment(reference, 10., 80)
+        error = math.radians(2)
+        off_center = [0, 218.4*math.sin(error), 218.4*math.cos(error)]
+        self.assertEqual(alignment.output(self.sample(off_center), 10.), (80, -80))
+        self.assertAlmostEqual(alignment.until-10., .075)
+        self.assertEqual(alignment.output(self.sample(off_center, 10.08), 10.08), (0, 0))
+        self.assertFalse(alignment.done)
+        for now in (11.4, 11.5, 11.6, 11.7):
+            self.assertEqual(alignment.output(self.sample(reference['xyz_camera_mm'], now), now), (0, 0))
+        self.assertTrue(alignment.done)
+
+    def test_approach_reaches_distance_band_before_fine_turns(self):
+        reference=dict(self.ref,xyz_camera_mm=[0,0,218.4],target_distance_mm=218.4)
+        alignment=ArucoAlignment(reference,10.,80)
+        distance=238.4
+        bearing=math.radians(2)
+        position=[0,distance*math.sin(bearing),distance*math.cos(bearing)]
+        self.assertEqual(alignment.output(self.sample(position),10.),(80,80))
+
+    def test_midrange_forward_uses_bounded_encoder_travel(self):
+        reference=dict(self.ref,xyz_camera_mm=[0,0,218.4],target_distance_mm=218.4)
+        alignment=ArucoAlignment(reference,10.,80)
+        odom=SimpleNamespace(left=0.,right=0.,imu_yaw=0.,imu_valid=True,imu_segment=1,revision=1)
+        self.assertEqual(alignment.output(self.sample([0,0,258.4]),10.,odom),(80,80))
+        self.assertAlmostEqual(alignment.until-10.,.35)
+        odom.left=odom.right=10.
+        self.assertEqual(alignment.output(self.sample([0,0,248.4],10.2),10.2,odom),(80,80))
+        odom.left=odom.right=15.
+        self.assertEqual(alignment.output(self.sample([0,0,243.4],10.25),10.25,odom),(0,0))
+        self.assertEqual(alignment.phase,'settle')
+
+    def test_quarter_turn_mode_still_rejects_orientation_outside_tolerance(self):
+        ref=dict(self.ref,xyz_camera_mm=[0,0,TARGET_DISTANCE_MM])
+        controller=ArucoAlignment(ref,10.,80,allow_marker_quarter_turns=True)
+        rotated_marker=[0.,0.,math.radians(60)]
+        for now in (10.,10.1,10.2):
+            controller.output(self.sample(ref['xyz_camera_mm'],now,rotated_marker),now)
+        with self.assertRaisesRegex(RuntimeError,r'orientación del marcador difiere 30\.0°'):
+            controller.output(self.sample(ref['xyz_camera_mm'],10.3,rotated_marker),10.3)
+        self.assertFalse(controller.done)
 
     def test_inclined_marker_cannot_report_ready(self):
-        target=(np.array(self.ref['xyz_camera_mm'])*180/np.linalg.norm(self.ref['xyz_camera_mm'])).tolist()
+        target=(np.array(self.ref['xyz_camera_mm'])*TARGET_DISTANCE_MM/np.linalg.norm(self.ref['xyz_camera_mm'])).tolist()
         controller=ArucoAlignment(self.ref,10.,80,require_orientation=False)
         for now in (10.,10.1,10.2):controller.output(self.sample(target,timestamp=now,rvec=[.4,0.,0.]),now)
         with self.assertRaisesRegex(RuntimeError,'inclinado'):controller.output(self.sample(target,timestamp=10.3,rvec=[.4,0.,0.]),10.3)

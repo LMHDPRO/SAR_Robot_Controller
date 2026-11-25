@@ -131,12 +131,12 @@ class CameraPanel(QtWidgets.QGroupBox):
             align=QtWidgets.QPushButton('Iniciar secuencia ArUco');align.clicked.connect(self.start_alignment);alignment.addWidget(align)
             resume=QtWidgets.QPushButton('Continuar alineación');resume.clicked.connect(self.continue_alignment);alignment.addWidget(resume)
             stop_alignment=QtWidgets.QPushButton('STOP AGV');stop_alignment.clicked.connect(self.alignment_stop.emit);alignment.addWidget(stop_alignment)
-            pickup=QtWidgets.QPushButton('Iniciar Approach → Pick → regreso');pickup.clicked.connect(self.pickup_requested.emit);box.addWidget(pickup)
-            pickup.setToolTip('Verifica primero la distancia real y el camino del brazo. El cierre se hace tras una espera de 1 segundo.')
-            release=QtWidgets.QPushButton('Dejar pieza → abrir → regresar');release.clicked.connect(self.release_requested.emit);box.addWidget(release)
-            release.setToolTip('Desde la postura segura con pinza cerrada: Approach, posición para dejar, abrir y regresar.')
+            pickup=QtWidgets.QPushButton('PICK');pickup.clicked.connect(self.pickup_requested.emit);box.addWidget(pickup)
+            pickup.setToolTip('Approach → PICK → cerrar pinza → DEPART → SAFE_Rescue. Verifica primero la distancia y el recorrido del brazo.')
+            release=QtWidgets.QPushButton('UNPICK');release.clicked.connect(self.release_requested.emit);box.addWidget(release)
+            release.setToolTip('SAFE_Rescue → DEPART → PICK → abrir pinza → Approach.')
             message=('Referencia guardada disponible; conecta la cámara para comprobarla.' if self.reference_path.is_file()
-                     else 'Sin referencia guardada: coloca el marcador a 20 cm y guarda la referencia.')
+                     else 'Sin referencia guardada: centra la pieza con el gripper a la distancia de recogida y guarda la referencia.')
             self.alignment_status=QtWidgets.QLabel(message);self.alignment_status.setWordWrap(True);box.addWidget(self.alignment_status)
         row=QtWidgets.QHBoxLayout();box.addLayout(row)
         self.connect_button=QtWidgets.QPushButton('Conectar');self.connect_button.clicked.connect(self.start);row.addWidget(self.connect_button)
@@ -151,7 +151,7 @@ class CameraPanel(QtWidgets.QGroupBox):
         details=QtWidgets.QVBoxLayout();view.addLayout(details,2)
         self.distance_label=QtWidgets.QLabel('Distancia aproximada: —');self.distance_label.setWordWrap(True);details.addWidget(self.distance_label)
         details.addWidget(self.table);details.addStretch()
-        note=QtWidgets.QLabel('1. Alinear AGV.  2. Verificar la distancia real y el recorrido del brazo.  3. Iniciar Approach → Pick → regreso. La telemetría del brazo es estimada.');note.setWordWrap(True);details.addWidget(note)
+        note=QtWidgets.QLabel('Alinea el AGV y verifica la distancia y el recorrido del brazo antes de iniciar PICK o UNPICK.');note.setWordWrap(True);details.addWidget(note)
         self.watchdog=QtCore.QTimer(self);self.watchdog.timeout.connect(self.check_age);self.watchdog.start(500)
 
     def config(self):return {'url':self.url.text().strip(),'dictionary':self.dictionary.currentText(),'marker_mm':self.marker.value(),'calibration':self.calibration.text().strip(),'rotation':self.rotation.currentData(),'arm_camera_api':self.arm_camera_api}
@@ -173,6 +173,8 @@ class CameraPanel(QtWidgets.QGroupBox):
         if old==new:return ref,False
         adapted=dict(ref)
         adapted['xyz_camera_mm']=[float(v)*new/old for v in ref['xyz_camera_mm']]
+        if 'target_distance_mm' in ref:
+            adapted['target_distance_mm']=ref['target_distance_mm']*new/old
         adapted['identity']=identity
         return adapted,True
     def save_reference(self):
@@ -183,14 +185,15 @@ class CameraPanel(QtWidgets.QGroupBox):
             import numpy as np
             positions=np.array([s['xyz_camera_mm'] for s in samples])
             if np.max(np.ptp(positions,axis=0))>5:raise ValueError('Las lecturas varían más de 5 mm; mantén el AGV quieto.')
-            distances=np.linalg.norm(positions,axis=1)
-            distance=float(np.mean(distances))
-            if not 185<=distance<=220:
+            position=np.mean(positions,axis=0)
+            distance=float(np.linalg.norm(position))
+            if not 170<=distance<=220:
                 direction='acerca' if distance>220 else 'aleja'
-                raise ValueError(f'Distancia estimada: {distance:.0f} mm; se requieren 185–220 mm. {direction.capitalize()} el marcador y verifica que su lado exterior mida {self.marker.value():g} mm.')
-            ref={'xyz_camera_mm':np.mean(positions,axis=0).tolist(),'rvec':samples[-1]['rvec'],'identity':identity,'image_size':samples[-1]['image_size']}
+                raise ValueError(f'Distancia estimada: {distance:.0f} mm; se requieren 170–220 mm. {direction.capitalize()} el marcador y verifica que su lado exterior mida {self.marker.value():g} mm.')
+            ref={'xyz_camera_mm':position.tolist(),'target_distance_mm':distance,'rvec':samples[-1]['rvec'],
+                 'identity':identity,'image_size':samples[-1]['image_size']}
             temp=self.reference_path.with_suffix('.tmp');temp.write_text(json.dumps(ref,indent=2),encoding='utf8');temp.replace(self.reference_path)
-            self.alignment_status.setText('Referencia guardada. El brazo debe estar detenido para alinear.')
+            self.alignment_status.setText(f'Referencia guardada a {distance:.1f} mm de cámara. El brazo debe estar detenido para alinear.')
         except (OSError,ValueError,KeyError,TypeError) as exc:self.alignment_status.setText('No se guardó la referencia: '+str(exc))
     def start_alignment(self):
         self.request_alignment(sequence=True)
@@ -300,9 +303,10 @@ class CameraPanel(QtWidgets.QGroupBox):
                                  QtCore.Qt.AspectRatioMode.KeepAspectRatio,QtCore.Qt.TransformationMode.FastTransformation)
             self.preview.setPixmap(pixmap)
             rows=packet['detections'];self.table.setRowCount(len(rows))
-            valid=[r for r in rows if r.get('id')==12 and 'xyz_camera_mm' in r and 'rvec' in r]
+            markers=[r for r in rows if r.get('id')==12]
+            valid=[r for r in markers if 'xyz_camera_mm' in r and 'rvec' in r]
             sample=None
-            if len(valid)==1 and 'captured_at' in packet and 'image_size' in packet:
+            if len(markers)==len(valid)==1 and 'captured_at' in packet and 'image_size' in packet:
                 sample=dict(valid[0],captured_at=packet['captured_at'],image_size=packet['image_size'],identity=self.active_identity)
                 self.marker_readings=(self.marker_readings+[sample])[-10:]
             # One missed frame must not erase a recent valid pose. Explicit
@@ -314,7 +318,11 @@ class CameraPanel(QtWidgets.QGroupBox):
                 values+=[f"{row['distance_mm']:.1f}" if 'distance_mm' in row else '—']
                 for j,value in enumerate(values):self.table.setItem(i,j,QtWidgets.QTableWidgetItem(value))
             errors=[r['error'] for r in rows if 'error' in r]
-            distance_info=f" · ArUco 12: {sample['distance_mm']:.0f} mm" if sample and 'distance_mm' in sample else ''
+            if sample and 'distance_mm' in sample:distance_info=f" · ArUco 12: {sample['distance_mm']:.0f} mm"
+            elif self.arm_camera_api:distance_info=''
+            elif len(markers)>1:distance_info=' · ArUco 12 duplicado'
+            elif markers:distance_info=' · ArUco 12 visible, sin pose válida'
+            else:distance_info=' · ArUco 12 no detectado'
             self.distance_label.setText(f"Distancia cámara: {sample['distance_mm']/10:.1f} cm\nComparación +12 cm: {sample['distance_mm']/10+12:.1f} cm (no controla el AGV)" if sample and 'distance_mm' in sample else 'Distancia aproximada: sin lectura válida')
             self.status.setText(f'ONLINE · {len(rows)} marcadores · '+('calibrada' if packet['metric'] else 'sin calibración: solo IDs/píxeles')+distance_info+(' · '+errors[0] if errors else ''))
         except (ValueError,KeyError,TypeError):self.status.setText('Frame inválido')

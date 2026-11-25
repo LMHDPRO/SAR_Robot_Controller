@@ -11,8 +11,8 @@ from arm import ArmKinematics
 from defaults import RUNTIME_DEFAULTS, GEOMETRY_DEFAULTS, GRIPPER_MIN_DEG, GRIPPER_MAX_DEG
 from core import Wait, distance_scale, Geometry, Odometry, Primitive, SingleEncoderMove, HeadingHold, ImuTurn, WheelCapture, wheel_correction, validate_routine
 from aruco_alignment import ArucoAlignment
-from pickup_sequence import GRIPPER_HOLD_DEG, PickupSequence
-from routine_blocks import ArmRoutineBlock, ArucoRoutineBlock
+from pickup_sequence import GRIPPER_HOLD_DEG, SAFE_RESCUE_ANGLES, PickupSequence, pickup_servo_target
+from routine_blocks import ArmRoutineBlock, ArucoMarkerUnavailable, ArucoRoutineBlock
 
 class Link:
     def __init__(self,host,port):
@@ -61,6 +61,8 @@ class Signals(QtCore.QObject):
 COCO_ARM_SPEED = (.25, .55, 1.0)
 COCO_AGV_SPEED = (85, 110, 135)
 COCO_ARM_MOVE_MS = 150
+ARUCO_RETRY_INTERVAL_S = 1.0
+ARUCO_RETRY_WINDOW_S = 20.0
 
 
 def coco_level(value, default):
@@ -87,6 +89,8 @@ class Engine(threading.Thread):
         self.live=None;self.live_heading=None;self.live_direction=0;self.routine_encoder='left';self.primitive=None;self.source='PC';self.last_ui=time.monotonic();self.path=deque(maxlen=10000)
         self.sent_pwm=(0,0)
         self.aruco_alignment=None;self.aruco_sample=None;self.aruco_status='';self.routine_running=False;self.routine_reference=None
+        self.routine_retry=None
+        self.routine_retry_at=None;self.routine_retry_deadline=None
         self.estop_latched=False;self.reset_pending=False;self.epoch=0;self.urgent_commands=queue.Queue()
         self.pool=ThreadPoolExecutor(max_workers=2);self.pending_links={};self.link_generation={'robot':0,'pad':0}
         self.runtime=dict(RUNTIME_DEFAULTS)
@@ -156,7 +160,8 @@ class Engine(threading.Thread):
         self.arm_approach=None
         self.collection_sequence=None
         self.pickup_sequence=None
-        self.routine_running=False;self.routine_reference=None
+        self.routine_running=False;self.routine_reference=None;self.routine_retry=None
+        self.routine_retry_at=None;self.routine_retry_deadline=None
         self.signals.cancelled.emit()
         if self.capture:self.capture.stop('Stopped: partial capture retained',time.monotonic())
         self.routine.clear();self.live=None;self.primitive=None;self.aruco_alignment=None;self.pad_authorized=False;self.pad_released=False;self.stopped=True
@@ -450,11 +455,12 @@ class Engine(threading.Thread):
             raise ValueError('Detén el movimiento actual antes de recolectar')
         if release:
             channels=self.telemetry.get('arm_angles')
-            if not isinstance(channels,list) or len(channels)!=6 or not all(isinstance(a,(float,int)) and math.isfinite(a) and abs(a-b)<=1 for a,b in zip(channels,[108,149,180,90,7,GRIPPER_HOLD_DEG])):
-                raise ValueError(f'Para dejar la pieza, primero coloca el brazo en la posición segura con la pinza a {GRIPPER_HOLD_DEG}°')
+            target=pickup_servo_target(SAFE_RESCUE_ANGLES,GRIPPER_HOLD_DEG)
+            if not isinstance(channels,list) or len(channels)!=6 or not all(isinstance(a,(float,int)) and math.isfinite(a) and abs(a-b)<=1 for a,b in zip(channels,target)):
+                raise ValueError(f'Para iniciar UNPICK, coloca el brazo en SAFE_Rescue con la pinza a {GRIPPER_HOLD_DEG}°')
         self.signals.cancelled.emit()
         now=time.monotonic()
-        self.pickup_sequence=PickupSequence([108.5,149.4,180,6.8],now,release=release)
+        self.pickup_sequence=PickupSequence(now,release=release)
         try:self.send_pickup_step(self.pickup_sequence.next_step(now))
         except Exception:
             self.pickup_sequence=None
@@ -462,9 +468,66 @@ class Engine(threading.Thread):
     def halt_loss(self):
         self.distance_reference=None
         self.halt(bool(self.runtime['cut_relays_on_loss']))
+    def pause_aruco_routine(self, reason, now):
+        checkpoint=(self.routine.copy(),self.routine_reference,self.routine_cap,self.routine_encoder)
+        deadline=self.routine_retry_deadline
+        if deadline is None:deadline=now+ARUCO_RETRY_WINDOW_S
+        self.halt()
+        self.routine_retry=checkpoint
+        self.routine_retry_deadline=deadline
+        if now<deadline:
+            self.routine_retry_at=min(now+ARUCO_RETRY_INTERVAL_S,deadline)
+            self.test_result=f'Paso {self.routine_step} pausado: {reason} Esperando detección para reintentar automáticamente.'
+        else:
+            self.test_result=f'Paso {self.routine_step} pausado: {reason} Pulsa «Reintentar paso ArUco» cuando vuelva la detección.'
+        self.emit(self.test_result)
+    def auto_retry_aruco_routine(self, now):
+        if self.routine_retry_at is None or now<self.routine_retry_at:return
+        if now>=self.routine_retry_deadline:
+            self.routine_retry_at=None
+            self.test_result=f'Paso {self.routine_step} pausado: agotado el tiempo de reintento automático. Pulsa «Reintentar paso ArUco».'
+            self.emit(self.test_result)
+            return
+        self.routine_retry_at=min(now+ARUCO_RETRY_INTERVAL_S,self.routine_retry_deadline)
+        if now-self.last_ui>.6:return
+        try:self.retry_aruco_routine()
+        except ValueError:pass
+    def retry_aruco_routine(self):
+        if self.routine_retry is None:
+            raise ValueError('No hay un paso ArUco pausado')
+        reason=self.motion_block()
+        if reason:raise ValueError(reason)
+        if self.live or self.primitive or self.aruco_alignment or self.collection_sequence or self.arm_approach or self.pickup_sequence:
+            raise ValueError('Espera a que termine el movimiento actual')
+        if not self.odom.imu_valid:raise ValueError('Espera una lectura válida de la IMU')
+        if self.sent_pwm!=(0,0) or self.telemetry.get('pl',0) or self.telemetry.get('pr',0):
+            raise ValueError('Espera a que el AGV se detenga')
+        remaining,reference,cap,encoder=self.routine_retry
+        sample=self.aruco_sample
+        if (not sample or sample.get('id')!=12 or sample.get('identity')!=reference.get('identity')
+                or not 0<=time.monotonic()-sample['captured_at']<=.5
+                or ('image_size' in reference and sample.get('image_size')!=reference['image_size'])):
+            raise ValueError('Espera una lectura reciente del ArUco 12 con la cámara de la rutina')
+        self.routine_reference=reference
+        try:self.start_test('aruco',None,cap)
+        except Exception:self.routine_reference=None;raise
+        self.routine=remaining;self.routine_cap=cap;self.routine_encoder=encoder
+        self.routine_running=True;self.routine_retry=None
+        self.routine_retry_at=None
+        self.test_result=f'Reintentando paso {self.routine_step}/{self.routine_total}: ArUco 12'
+        self.emit(self.test_result)
     def handle(self,k,v):
         if k=='heartbeat':self.last_ui=time.monotonic();return
         if k=='aruco_sample':self.aruco_sample=v;return
+        if k=='routine_retry':
+            try:
+                self.retry_aruco_routine()
+                self.routine_retry_deadline=None
+            except ValueError as e:self.emit(f'No se reanudó la rutina: {e}')
+            return
+        if self.routine_retry_at is not None and k not in ('stop','estop','arm_camera_url','export'):
+            self.routine_retry_at=None
+            self.test_result=f'Paso {self.routine_step} pausado. Pulsa «Reintentar paso ArUco» para continuar.'
         if self.routine_running and k not in ('stop','estop'):
             raise ValueError('STOP antes de modificar una rutina en ejecución')
         if k=='pickup_start':
@@ -619,14 +682,19 @@ class Engine(threading.Thread):
             self.routine_encoder=side
             steps=validate_routine(steps)
             ref=v[3] if len(v)>3 else None
-            if any(kind=='aruco' for kind,_ in steps) and not isinstance(ref,dict):raise ValueError('Conecta la cámara y carga una referencia ArUco válida')
+            start=v[4] if len(v)>4 else 0
+            if type(start) is not int or not 0<=start<len(steps):
+                raise ValueError('Selecciona un paso válido de la rutina')
+            if any(kind=='aruco' for kind,_ in steps[start:]) and not isinstance(ref,dict):raise ValueError('Conecta la cámara y carga una referencia ArUco válida')
             if self.source!='PC':raise ValueError('Select PC ownership for routines')
             if self.live or self.primitive or self.routine or self.capture:raise ValueError('STOP before starting a routine')
             self.routine_reference=ref;self.routine_running=True
-            try:self.start_test(steps[0][0],steps[0][1],cap)
+            try:self.start_test(*steps[start],cap)
             except Exception:self.routine_running=False;self.routine_reference=None;raise
-            self.routine=deque(steps[1:]);self.routine_total=len(steps);self.routine_step=1;self.routine_cap=cap
-            self.emit(f'Routine started: {len(steps)} steps; no automatic resume after interruption')
+            self.routine=deque(steps[start+1:]);self.routine_total=len(steps);self.routine_step=start+1;self.routine_cap=cap
+            self.routine_retry=None
+            self.routine_retry_at=None;self.routine_retry_deadline=None
+            self.emit(f'Rutina iniciada en el paso {self.routine_step}/{self.routine_total}')
         elif k=='primitive':
             if self.routine:raise ValueError('STOP the running routine first')
             if self.source=='PC':self.start_test(*v)
@@ -672,6 +740,20 @@ class Engine(threading.Thread):
         if kind in ('distance','distance_imu'):
             self.test_result=f'Running {value:g} cm with {encoder_side or self.routine_encoder} encoder and IMU heading hold'
         else:self.test_result=f'Running {kind}: {value}'
+
+    def start_next_routine_step(self, now):
+        kind,value=self.routine[0]
+        if kind in ('pickup','release','arm','arm_xyz') and (
+                self.sent_pwm!=(0,0) or self.telemetry.get('pl',0) or self.telemetry.get('pr',0)):
+            self.test_result=f'Esperando PWM cero para iniciar el paso {self.routine_step+1}: {kind}'
+            if now-self.next_step_at>=3:
+                raise RuntimeError(self.test_result+' (sin confirmación durante 3 s)')
+            return
+        self.start_test(kind,value,self.routine_cap)
+        self.routine.popleft()
+        self.routine_step+=1
+        self.emit(f'Paso {self.routine_step}/{self.routine_total}: {kind}' + (f' {value:g}' if isinstance(value,(int,float)) else ''))
+
     def set_live_drive(self,wheels,now):
         straight=bool(wheels and wheels[0]==wheels[1] and wheels[0]!=0)
         direction=(1 if wheels[0]>0 else -1) if straight else 0
@@ -941,6 +1023,7 @@ class Engine(threading.Thread):
                     self.pad.close();self.pad=None;self.pad_data={};self.last_pad=0
                     self.emit('COCO RX silent >3 s: reconnecting, release DM')
                 l=r=0
+                self.auto_retry_aruco_routine(now)
                 if self.aruco_alignment:
                     try:
                         reason=self.motion_block()
@@ -960,8 +1043,7 @@ class Engine(threading.Thread):
                         self.halt();self.test_result='Alineación detenida: '+str(e);self.emit(self.test_result);l=r=0
                 if self.robot and self.telemetry.get('armed') and now-self.last_robot<=0.5 and now-self.last_ui<=.6 and not self.estop_latched and self.telemetry.get('protocol')==1:
                     if self.routine and not self.primitive and not self.pickup_sequence and not self.live and now>=self.next_step_at:
-                        kind,value=self.routine.popleft();self.start_test(kind,value,self.routine_cap);self.routine_step+=1
-                        self.emit(f'Paso {self.routine_step}/{self.routine_total}: {kind}' + (f' {value:g}' if isinstance(value,(int,float)) else ''))
+                        self.start_next_routine_step(now)
                     # Advance timed pulses only when their PWM will be sent.
                     if self.coco_turn_state=='RUN' and now-last_output>=.05:
                         l,r=self.coco_turn_output(now)
@@ -971,6 +1053,7 @@ class Engine(threading.Thread):
                             if self.primitive.done:
                                 p=self.primitive
                                 if p.kind in ('arm_block','aruco_block'):
+                                    if p.kind=='aruco_block':self.routine_retry_deadline=None
                                     self.test_result='Bloque de brazo finalizado (PWM estimado)' if p.kind=='arm_block' else p.controller.message
                                     self.primitive=None;self.stopped=True;self.next_step_at=now+0.5
                                     if self.routine_running and not self.routine:
@@ -991,6 +1074,8 @@ class Engine(threading.Thread):
                                 self.primitive=None;self.stopped=True;self.next_step_at=now+0.5
                                 if self.routine_running and not self.routine:
                                     self.routine_running=False;self.emit('Rutina finalizada. Verifica la posición física del robot.')
+                        except ArucoMarkerUnavailable as e:
+                            self.pause_aruco_routine(e,now);l=r=0
                         except RuntimeError as e:
                             self.halt();self.test_result='Stopped: '+str(e);self.emit(self.test_result);l=r=0
                     elif self.live:
@@ -1054,7 +1139,7 @@ class Engine(threading.Thread):
                         if self.source=='COCO':self.halt_loss()
                         self.pad.close();self.pad=None
                 if now-getattr(self,'last_render',0)>0.1:
-                    self.last_render=now;self.signals.state.emit({'source':self.source,'distance_calibration':self.distance_result,'distance_progress':({'side':self.distance_reference['side'],'left_cm':(self.odom.left-self.distance_reference['left'])/10,'right_cm':(self.odom.right-self.distance_reference['right'])/10} if self.distance_reference else None),'pose_revision':self.odom.revision,'imu_segment':self.odom.imu_segment,'single_left':self.odom.single_left,'single_right':self.odom.single_right,'host_monotonic':now,'sent_pwm':self.sent_pwm,'estop_latched':self.estop_latched,'age':now-self.last_robot if self.last_robot else 0,'vl':self.odom.vl,'vr':self.odom.vr,'routine_step':self.routine_step,'routine_total':self.routine_total,'telemetry':dict(self.telemetry),'fresh':bool(self.robot and now-self.last_robot<0.5),'pad_fresh':bool(self.pad and now-self.last_pad<0.5),'path':list(self.path),'x':self.odom.x,'y':self.odom.y,'yaw':math.degrees(self.odom.yaw),'imu_yaw':self.odom.imu_yaw,'speed':self.odom.v,'result':self.test_result,'pad':dict(self.pad_data),'enc_yaw':math.degrees(self.odom.enc_yaw),'imu_valid':self.odom.imu_valid,'imu_reason':self.odom.imu_reason,'yaw_source':self.odom.source,'robot_retry':bool(self.robot_host and self.robot is None),'pad_retry':bool(self.pad_host and self.pad is None),'geometry':asdict(self.g),'capture_active':self.capture is not None,'last_wheel_test':self.last_wheel_test,'turn_delta':self.turn_delta,'dl':self.odom.dl,'dr':self.odom.dr,'arm_angles':self.arm_angles.tolist(),'arm_gripper':self.arm_gripper,'arm_target_angles':self.arm_target_angles.tolist(),'arm_target_gripper':self.arm_target_gripper,'arm_busy':self.arm_busy,'arm_error':self.arm_error})
+                    self.last_render=now;self.signals.state.emit({'source':self.source,'distance_calibration':self.distance_result,'distance_progress':({'side':self.distance_reference['side'],'left_cm':(self.odom.left-self.distance_reference['left'])/10,'right_cm':(self.odom.right-self.distance_reference['right'])/10} if self.distance_reference else None),'pose_revision':self.odom.revision,'imu_segment':self.odom.imu_segment,'single_left':self.odom.single_left,'single_right':self.odom.single_right,'host_monotonic':now,'sent_pwm':self.sent_pwm,'estop_latched':self.estop_latched,'age':now-self.last_robot if self.last_robot else 0,'vl':self.odom.vl,'vr':self.odom.vr,'routine_step':self.routine_step,'routine_total':self.routine_total,'routine_can_retry':self.routine_retry is not None,'routine_running':self.routine_running,'telemetry':dict(self.telemetry),'fresh':bool(self.robot and now-self.last_robot<0.5),'pad_fresh':bool(self.pad and now-self.last_pad<0.5),'path':list(self.path),'x':self.odom.x,'y':self.odom.y,'yaw':math.degrees(self.odom.yaw),'imu_yaw':self.odom.imu_yaw,'speed':self.odom.v,'result':self.test_result,'pad':dict(self.pad_data),'enc_yaw':math.degrees(self.odom.enc_yaw),'imu_valid':self.odom.imu_valid,'imu_reason':self.odom.imu_reason,'yaw_source':self.odom.source,'robot_retry':bool(self.robot_host and self.robot is None),'pad_retry':bool(self.pad_host and self.pad is None),'geometry':asdict(self.g),'capture_active':self.capture is not None,'last_wheel_test':self.last_wheel_test,'turn_delta':self.turn_delta,'dl':self.odom.dl,'dr':self.odom.dr,'arm_angles':self.arm_angles.tolist(),'arm_gripper':self.arm_gripper,'arm_target_angles':self.arm_target_angles.tolist(),'arm_target_gripper':self.arm_target_gripper,'arm_busy':self.arm_busy,'arm_error':self.arm_error})
             except Exception as e:self.halt(False);self.emit('Stopped: '+str(e))
             time.sleep(0.005)
         self.halt(True)
@@ -1203,7 +1288,7 @@ class Window(QtWidgets.QMainWindow):
         self.button(df,'2. APPLY + SAVE distance scale',lambda:self.engine.post('distance_apply',self.real_distance.value()))
         cal.addWidget(distance_box);cal.addStretch()
         routine.addWidget(QtWidgets.QLabel('Bloques en orden · encoder seleccionado en Drive · STOP cancela todo'))
-        self.routine_kind=QtWidgets.QComboBox();self.routine_kind.addItems(['Avanzar / retroceder (cm)','Girar · IMU preciso (°)','Esperar (s)','Brazo · servos','Brazo · XYZ (mm)','Alinear ArUco 12','Pick Up Piece','Place Piece'])
+        self.routine_kind=QtWidgets.QComboBox();self.routine_kind.addItems(['Avanzar / retroceder (cm)','Girar · IMU preciso (°)','Esperar (s)','Brazo · servos','Brazo · XYZ (mm)','Alinear ArUco 12','PICK','UNPICK'])
         self.routine_value=self.number(-360,360,20,'');f=QtWidgets.QFormLayout();f.addRow('Bloque',self.routine_kind);f.addRow('Valor',self.routine_value);routine.addLayout(f)
         self.routine_joints=QtWidgets.QGroupBox('Ángulos de servos');jf=QtWidgets.QFormLayout(self.routine_joints)
         self.routine_joint_fields=[]
@@ -1230,11 +1315,19 @@ class Window(QtWidgets.QMainWindow):
         r=QtWidgets.QHBoxLayout();routine.addLayout(r);self.button(r,'Subir',lambda:self.move_routine_step(-1));self.button(r,'Bajar',lambda:self.move_routine_step(1));self.button(r,'Eliminar',self.remove_step);self.button(r,'Limpiar',self.clear_steps)
         r=QtWidgets.QHBoxLayout();routine.addLayout(r);self.button(r,'Load',self.load_routine);self.button(r,'Save',self.save_routine)
         self.button(routine,'EJECUTAR PROGRAMA',self.run_routine)
+        self.routine_can_retry=False;self.routine_active=False
+        self.routine_start_step_button=self.button(routine,'Ejecutar desde el paso seleccionado',self.run_selected_routine_step)
+        self.routine_start_step_button.setEnabled(False)
+        self.routine_retry_button=QtWidgets.QPushButton('Reintentar paso ArUco')
+        self.routine_retry_button.setEnabled(False)
+        self.routine_retry_button.clicked.connect(self.retry_routine)
+        self.routine_list.currentRowChanged.connect(self.update_routine_buttons)
+        routine.addWidget(self.routine_retry_button)
         self.button(routine,'Abrir cámara ArUco',lambda:self.workspaces.setCurrentWidget(self.camera_scroll))
         manual_actions=QtWidgets.QHBoxLayout();routine.addLayout(manual_actions)
         manual_actions.addWidget(QtWidgets.QLabel('Manual actions'))
-        self.button(manual_actions,'Pick Up Piece',lambda:self.engine.post('pickup_start'))
-        self.button(manual_actions,'Place Piece',lambda:self.engine.post('release_start'))
+        self.button(manual_actions,'PICK',lambda:self.engine.post('pickup_start'))
+        self.button(manual_actions,'UNPICK',lambda:self.engine.post('release_start'))
         self.button(routine,'STOP programa',self.global_stop)
         self.build_arm_tab(arm)
         right=QtWidgets.QVBoxLayout();row.addLayout(right,1)
@@ -1469,7 +1562,7 @@ class Window(QtWidgets.QMainWindow):
         self.routine_list.clear()
         for n,(kind,v) in enumerate(self.routine_steps,1):
             if kind=='aruco':description='Alinear ArUco 12'
-            elif kind in ('pickup','release'):description='Pick Up Piece' if kind=='pickup' else 'Place Piece'
+            elif kind in ('pickup','release'):description='PICK' if kind=='pickup' else 'UNPICK'
             elif kind in ('arm','arm_xyz'):
                 key='joints' if kind=='arm' else 'xyz'
                 description=f"{'Servos' if kind=='arm' else 'XYZ'} {v[key]} · CH3 {v['rotation']}° · pinza {v['gripper']}° · {v['duration_ms']/1000:g} s"
@@ -1494,11 +1587,23 @@ class Window(QtWidgets.QMainWindow):
         if index<0 or not 0<=new<len(self.routine_steps):return
         self.routine_steps[index],self.routine_steps[new]=self.routine_steps[new],self.routine_steps[index]
         self.refresh_steps();self.routine_list.setCurrentRow(new)
-    def run_routine(self):
+    def update_routine_buttons(self):
+        row=self.routine_list.currentRow()
+        self.routine_start_step_button.setEnabled(not self.routine_active and 0<=row<len(self.routine_steps))
+        self.routine_retry_button.setEnabled(not self.routine_active and self.routine_can_retry)
+    def retry_routine(self):
+        self.routine_retry_button.setEnabled(False)
+        if self.routine_can_retry:self.engine.post('routine_retry')
+    def run_selected_routine_step(self):
+        row=self.routine_list.currentRow()
+        if 0<=row<len(self.routine_steps):
+            self.routine_start_step_button.setEnabled(False)
+            self.run_routine(row)
+    def run_routine(self,start=0):
         try:
             steps=validate_routine(self.routine_steps)
-            ref=self.cameras.panels[0].get_alignment_reference() if any(kind=='aruco' for kind,_ in steps) else None
-            self.engine.post('routine',(steps,self.cap.value(),self.move_encoder.currentText().lower(),ref))
+            ref=self.cameras.panels[0].get_alignment_reference() if any(kind=='aruco' for kind,_ in steps[start:]) else None
+            self.engine.post('routine',(steps,self.cap.value(),self.move_encoder.currentText().lower(),ref,start))
         except (ValueError,OSError,KeyError,TypeError) as exc:self.message(f'No se inició el programa: {exc}')
     def remove_step(self):
         i=self.routine_list.currentRow()
@@ -1519,6 +1624,8 @@ class Window(QtWidgets.QMainWindow):
         if p:self.engine.post('export',p)
     def render(self,s):
         self.lidar_workspace.receive_state(s)
+        self.routine_can_retry=s.get('routine_can_retry',False);self.routine_active=s.get('routine_running',False)
+        self.update_routine_buttons()
         sample=self.cameras.panels[0].marker_readings[-1] if self.cameras.panels[0].marker_readings else None
         marker=(f"ArUco 12: {sample['distance_mm']:.0f} mm (estimado)" if sample and time.monotonic()-sample['captured_at']<.5 and 'distance_mm' in sample else 'ArUco 12: sin lectura reciente')
         angles=', '.join(f'{v:.0f}°' for v in s.get('arm_angles',[]))

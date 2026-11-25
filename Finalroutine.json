@@ -1,0 +1,103 @@
+{
+  "version": 2,
+  "steps": [
+    [
+      "arm",
+      {
+        "joints": [
+          108.5,
+          149.5,
+          180.0,
+          90.0
+        ],
+        "gripper": 75.0,
+        "rotation": 90.0,
+        "duration_ms": 3000
+      }
+    ],
+    [
+      "arm",
+      {
+        "joints": [
+          108.5,
+          70.0,
+          180.0,
+          180.0
+        ],
+        "gripper": 75.0,
+        "rotation": 90.0,
+        "duration_ms": 3000
+      }
+    ],
+    [
+      "distance",
+      120.0
+    ],
+    [
+      "imu_precise",
+      180.0
+    ],
+    [
+      "distance",
+      35.0
+    ],
+    [
+      "imu_precise",
+      90.0
+    ],
+    [
+      "distance",
+      40.0
+    ],
+    [
+      "arm",
+      {
+        "joints": [
+          108.5,
+          149.5,
+          180.0,
+          90.0
+        ],
+        "gripper": 75.0,
+        "rotation": 90.0,
+        "duration_ms": 3000
+      }
+    ],
+    [
+      "distance",
+      60.0
+    ],
+    [
+      "imu_precise",
+      45.0
+    ],
+    [
+      "aruco",
+      null
+    ],
+    [
+      "pickup",
+      null
+    ],
+    [
+      "distance",
+      -10.0
+    ],
+    [
+      "imu_precise",
+      135.0
+    ],
+    [
+      "distance",
+      45.0
+    ],
+    [
+      "imu_precise",
+      90.0
+    ],
+    [
+      "release",
+      null
+    ]
+  ]
+}

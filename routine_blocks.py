@@ -28,17 +28,25 @@ class ArmRoutineBlock:
         return 0,0
 
 
+class ArucoMarkerUnavailable(RuntimeError):
+    """A routine can retry this visual step from the current position."""
+
+
 class ArucoRoutineBlock:
     kind='aruco_block'
     def __init__(self,engine,reference,now):
         self.engine=engine;self.done=False
-        self.controller=ArucoAlignment(reference,now,engine.min_pwm,require_orientation=True,require_new_sample=True)
+        self.controller=ArucoAlignment(reference,now,engine.min_pwm,require_new_sample=True,allow_marker_quarter_turns=True)
         self.engine.aruco_sample=None
     def output(self,odom,now):
         if not odom.imu_valid:raise RuntimeError('Bloque ArUco detenido: IMU no válida')
         sample=self.engine.aruco_sample
         if sample is not None and sample.get('identity')!=self.controller.ref.get('identity'):
             raise RuntimeError('Bloque ArUco detenido: cambió la cámara o su configuración')
-        output=self.controller.output(self.engine.aruco_sample,now,odom)
+        output=self.controller.output(sample,now,odom)
+        last_sample=self.controller.last_valid_sample
+        last_seen=last_sample['captured_at'] if last_sample else self.controller.started
+        if now-last_seen>=2.0:
+            raise ArucoMarkerUnavailable('ArUco 12 sin lectura válida.')
         self.done=self.controller.done
         return output

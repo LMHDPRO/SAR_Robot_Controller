@@ -6,14 +6,22 @@ import numpy as np
 # The stream has no camera exposure timestamp. Allow the reported ~1 s
 # pipeline delay to clear after motion before acting on another observation.
 ASSUMED_CAMERA_LATENCY_S = 1.0
-TARGET_DISTANCE_MM = 180.0
+# Camera reading with the AGV at the 180 mm ruler-measured pickup position.
+TARGET_DISTANCE_MM = 210.1
 DISTANCE_TOLERANCE_MM = 5.0
+APPROACH_BEARING_TOLERANCE_DEG = 3.0
+FINAL_BEARING_TOLERANCE_DEG = 1.0
+FINE_TURN_PULSE_S = 0.075
 
 
 class ArucoAlignment:
-    def __init__(self, reference, now, pwm, require_orientation=True, require_new_sample=False):
+    def __init__(self, reference, now, pwm, require_orientation=True, require_new_sample=False, *, allow_marker_quarter_turns=False):
         self.ref = reference
+        self.target_distance_mm = float(reference.get('target_distance_mm', TARGET_DISTANCE_MM))
+        if not 0 < self.target_distance_mm <= 600:
+            raise ValueError('Distancia objetivo ArUco fuera de rango')
         self.require_orientation = require_orientation
+        self.allow_marker_quarter_turns = allow_marker_quarter_turns
         self.minimum_sample_time=now if require_new_sample else now-.5
         self.started = now
         self.pwm = min(90, max(1, int(pwm)))
@@ -54,7 +62,7 @@ class ArucoAlignment:
             raise RuntimeError('Pose del marcador inválida')
         distance = float(np.linalg.norm(xyz))
         target = np.asarray(self.ref['xyz_camera_mm'], dtype=float)
-        target_distance = TARGET_DISTANCE_MM
+        target_distance = self.target_distance_mm
         if distance < target_distance-DISTANCE_TOLERANCE_MM: raise RuntimeError('Demasiado cerca del marcador; mueve el AGV manualmente')
         if distance > 600: raise RuntimeError('Marcador demasiado lejos para esta aproximación')
         if self.phase == 'forward':
@@ -62,7 +70,8 @@ class ArucoAlignment:
                    and odom.revision==self.forward_revision)
             travel=abs(((odom.left-self.forward_left)+(odom.right-self.forward_right))/2) if valid else 0
             yaw=abs(odom.imu_yaw-self.forward_yaw) if valid else 0
-            if valid and now<self.until and travel<20 and yaw<4 and distance>target_distance+60:
+            if (valid and now<self.until and travel<self.forward_travel_limit
+                    and yaw<4 and distance>self.forward_stop_distance):
                 return self.wheels
             self.phase='settle';self.until=now+.25+ASSUMED_CAMERA_LATENCY_S
             return (0,0)
@@ -76,35 +85,49 @@ class ArucoAlignment:
             self.phase = 'observe'
         if sample['captured_at'] <= self.last_sample: return (0, 0)
         self.last_sample = sample['captured_at']
-        bearing = math.atan2(xyz[1], xyz[2])-math.atan2(target[1], target[2])
-        if abs(bearing) > math.radians(3):
+        bearing = math.degrees(math.atan2(xyz[1], xyz[2])-math.atan2(target[1], target[2]))
+        at_target_distance = distance <= target_distance+DISTANCE_TOLERANCE_MM
+        bearing_tolerance = FINAL_BEARING_TOLERANCE_DEG if at_target_distance else APPROACH_BEARING_TOLERANCE_DEG
+        if abs(bearing) > bearing_tolerance:
             self.stable = 0
-            pulse_duration = .12
+            pulse_duration = FINE_TURN_PULSE_S if at_target_distance and abs(bearing)<=2.5 else .12
             # Empirically verified: positive camera Y error requires a right turn.
             self.wheels = (self.pwm, -self.pwm) if bearing > 0 else (-self.pwm, self.pwm)
-        elif distance > target_distance+DISTANCE_TOLERANCE_MM:
+        elif not at_target_distance:
             self.stable = 0
             error=distance-target_distance
             speed=90 if error>60 else self.pwm
             self.wheels = (speed, speed)
             pulse_duration=.30 if error>60 else .20 if error>50 else .10
-            if error>60 and odom is not None and odom.imu_valid:
+            if error>30 and odom is not None and odom.imu_valid:
                 self.forward_left=odom.left;self.forward_right=odom.right
                 self.forward_yaw=odom.imu_yaw;self.forward_segment=odom.imu_segment
                 self.forward_revision=odom.revision
-                self.phase='forward';self.until=now+.9
+                self.forward_travel_limit=20 if error>60 else 15
+                self.forward_stop_distance=target_distance+(60 if error>60 else 20)
+                self.phase='forward';self.until=now+(.9 if error>60 else .35)
                 return self.wheels
         else:
             self.stable += 1
             if self.stable >= 4:
                 current_r, _ = cv2.Rodrigues(rvec)
                 target_r, _ = cv2.Rodrigues(np.asarray(self.ref['rvec'], dtype=float))
-                angle = math.degrees(math.acos(float(np.clip((np.trace(target_r.T @ current_r)-1)/2, -1, 1))))
-                if self.require_orientation and angle > 12: raise RuntimeError(f'Posición alcanzada, pero orientación difiere {angle:.1f}°; ajusta manualmente')
+                relative = target_r.T @ current_r
+                trace = np.trace(relative)
+                if self.allow_marker_quarter_turns:
+                    # Maximize the trace over 0°, 90°, 180° and 270° about the marker normal.
+                    in_plane = relative[0,0]+relative[1,1]
+                    cross = relative[1,0]-relative[0,1]
+                    trace = relative[2,2]+max(abs(in_plane),abs(cross))
+                angle = math.degrees(math.acos(float(np.clip((trace-1)/2, -1, 1))))
+                if self.require_orientation and angle > 12:
+                    raise RuntimeError(f'Centrado horizontal {bearing:+.1f}°; orientación del marcador difiere {angle:.1f}° de la referencia. '
+                                       'Verifica la pose de recogida y vuelve a guardar la referencia ArUco 12.')
                 normal_angle = math.degrees(math.acos(float(np.clip(abs(current_r[2,2]),0,1))))
                 if normal_angle > 10: raise RuntimeError(f'Marcador inclinado {normal_angle:.1f}° respecto a la cámara; ajusta la posición manualmente')
                 self.done = True
-                self.message = f'LISTO PARA EXTRACCIÓN: alineación visual estimada; confirma distancia real ({distance:.0f} mm en cámara) y posición antes de continuar'
+                self.message = (f'LISTO PARA EXTRACCIÓN: {distance:.0f} mm en cámara, error horizontal {bearing:+.1f}°. '
+                                'Confirma la distancia real y la posición antes de continuar.')
             return (0, 0)
         self.phase = 'pulse'; self.until = now+pulse_duration
         self.pulses += 1

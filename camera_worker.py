@@ -21,8 +21,16 @@ def load_calibration(path):
     return k,d,size
 
 
-def detect(frame,detector,marker_mm,calibration):
+def detect(frame,detector,marker_mm,calibration,contrast=None):
     corners,ids,_=detector.detectMarkers(frame)
+    if contrast is not None and (ids is None or 12 not in ids):
+        gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+        enhanced_corners,enhanced_ids,_=detector.detectMarkers(contrast.apply(gray))
+        if enhanced_ids is not None and 12 in enhanced_ids:
+            target_indices=np.flatnonzero(enhanced_ids.ravel()==12)
+            corners=tuple(corners)+tuple(enhanced_corners[i] for i in target_indices)
+            target_ids=enhanced_ids[target_indices]
+            ids=target_ids if ids is None else np.concatenate((ids,target_ids))
     rows=[]
     if ids is None:return rows
     cv2.aruco.drawDetectedMarkers(frame,corners,ids)
@@ -47,6 +55,7 @@ def detect(frame,detector,marker_mm,calibration):
                         row.update(xyz_camera_mm=t.reshape(3).tolist(),distance_mm=float(np.linalg.norm(t)),rvec=r.reshape(3).tolist())
                         cv2.drawFrameAxes(frame,k,d,r,t,marker_mm*.5)
                     else:row['error']='Pose descartada: reproyección >3 px'
+                else:row['error']='No se pudo estimar una pose válida'
         rows.append(row)
     return rows
 
@@ -75,6 +84,7 @@ def run(config):
     parameters.minMarkerPerimeterRate=0.015
     parameters.cornerRefinementMethod=cv2.aruco.CORNER_REFINE_SUBPIX
     detector=cv2.aruco.ArucoDetector(dictionary,parameters)
+    contrast=None if config.get('arm_camera_api') else cv2.createCLAHE(clipLimit=2.0,tileGridSize=(8,8))
     source=config['url'].strip()
     if not config.get('arm_camera_api') and not source.startswith(('http://','https://','rtsp://')):
         raise ValueError('Introducir URL http(s) o rtsp de la cámara ESP32')
@@ -97,7 +107,7 @@ def run(config):
                 # This is the local read time, not the camera exposure time;
                 # ESP32/network/FFmpeg buffering latency is unknown here.
                 captured_at=time.monotonic()
-                rows=detect(frame,detector,marker_mm,calibration)
+                rows=detect(frame,detector,marker_mm,calibration,contrast)
                 preview=rotate_preview(frame,rotation)
                 h,w=preview.shape[:2]
                 scale=min(1.0,640/max(w,h))

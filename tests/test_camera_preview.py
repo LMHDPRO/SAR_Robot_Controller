@@ -11,7 +11,7 @@ import numpy as np
 from PySide6 import QtGui, QtWidgets
 from app import Engine, Window
 from arm_workspace import ArmWorkspace
-from camera_worker import rotate_preview, run as run_camera_worker
+from camera_worker import detect, rotate_preview, run as run_camera_worker
 from cameras import CameraPanel
 from robotarm_v7 import VisionThread
 
@@ -20,6 +20,21 @@ APP=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 class CameraPreviewTests(unittest.TestCase):
+    def test_routine_button_starts_at_the_selected_pick_step(self):
+        with patch.object(Engine,'start'), patch.object(Engine,'join'), patch('cameras.CamerasPage.save'):
+            window=Window()
+            try:
+                window.routine_steps=[('aruco',None),('pickup',None),('wait',1)]
+                window.refresh_steps()
+                window.routine_list.setCurrentRow(1)
+                self.assertTrue(window.routine_start_step_button.isEnabled())
+                with patch.object(window.engine,'post') as post:
+                    window.routine_start_step_button.click()
+                post.assert_called_once_with('routine',(window.routine_steps,window.cap.value(),'left',None,1))
+            finally:
+                window.close()
+                window.engine.pool.shutdown()
+
     def test_routine_preview_reuses_camera_frame_and_clears_on_stop(self):
         with patch('cameras.CamerasPage.save'):
             window=Window()
@@ -39,11 +54,12 @@ class CameraPreviewTests(unittest.TestCase):
                 APP.processEvents()
     def test_reference_size_change_rescales_without_accepting_other_changes(self):
         saved={'url':'camera','dictionary':'DICT_6X6_250','marker_mm':35.,'calibration_sha256':'abc'}
-        ref={'identity':saved,'xyz_camera_mm':[35.,70.,175.]}
+        ref={'identity':saved,'xyz_camera_mm':[35.,70.,175.],'target_distance_mm':210.}
         current=dict(saved,marker_mm=30.)
         result,changed=CameraPanel.adapt_reference_size(ref,current)
         self.assertTrue(changed)
         np.testing.assert_allclose(result['xyz_camera_mm'],[30.,60.,150.])
+        self.assertEqual(result['target_distance_mm'],180.)
         self.assertEqual(ref['identity']['marker_mm'],35.)
         with self.assertRaisesRegex(ValueError,'calibración'):
             CameraPanel.adapt_reference_size(ref,dict(current,calibration_sha256='different'))
@@ -62,9 +78,12 @@ class CameraPreviewTests(unittest.TestCase):
                 self.assertIn('300 mm',panel.alignment_status.text())
                 self.assertIn('Acerca',panel.alignment_status.text())
                 self.assertFalse(panel.reference_path.exists())
-                for sample in panel.marker_readings:sample['xyz_camera_mm']=[0,0,200]
+                centered=[-61.7,-29.0,165.2]
+                for sample in panel.marker_readings:sample['xyz_camera_mm']=centered
                 panel.save_reference()
-                self.assertTrue(panel.reference_path.exists())
+                saved=json.loads(panel.reference_path.read_text(encoding='utf8'))
+                np.testing.assert_allclose(saved['xyz_camera_mm'],centered)
+                self.assertAlmostEqual(saved['target_distance_mm'],178.7,places=1)
 
     def test_preview_rotation_supports_both_ninety_degree_directions(self):
         frame=np.arange(6,dtype=np.uint8).reshape(2,3)
@@ -74,6 +93,22 @@ class CameraPreviewTests(unittest.TestCase):
 
         np.testing.assert_array_equal(clockwise,np.array([[3,0],[4,1],[5,2]],dtype=np.uint8))
         np.testing.assert_array_equal(counterclockwise,np.array([[2,5],[1,4],[0,3]],dtype=np.uint8))
+
+    def test_contrast_fallback_recovers_low_contrast_marker_with_valid_pose(self):
+        dictionary=cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+        parameters=cv2.aruco.DetectorParameters()
+        parameters.minMarkerPerimeterRate=.015
+        parameters.cornerRefinementMethod=cv2.aruco.CORNER_REFINE_SUBPIX
+        detector=cv2.aruco.ArucoDetector(dictionary,parameters)
+        marker=cv2.aruco.generateImageMarker(dictionary,12,48)
+        frame=np.full((480,640,3),150,np.uint8)
+        frame[188:236,284:332]=np.where(marker[...,None],150,137)
+        calibration=(np.array([[600.,0.,320.],[0.,600.,240.],[0.,0.,1.]]),np.zeros(5),[640,480])
+        contrast=cv2.createCLAHE(clipLimit=2.0,tileGridSize=(8,8))
+        rows=detect(frame,detector,30,calibration,contrast)
+        self.assertEqual([row['id'] for row in rows],[12])
+        self.assertIn('distance_mm',rows[0])
+        self.assertLessEqual(rows[0]['reprojection_px'],3.)
 
     def test_camera_worker_retries_a_lost_stream(self):
         first=Mock()

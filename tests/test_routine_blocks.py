@@ -1,3 +1,4 @@
+import math
 import time
 import unittest
 from unittest.mock import Mock
@@ -52,7 +53,59 @@ class RoutineBlockTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'cambió la cámara'):
             block.output(self.engine.odom,.1)
 
-    def test_arm_block_advances_to_wait_in_running_engine(self):
+    def test_can_start_from_selected_aruco_step(self):
+        ref={'xyz_camera_mm':[0,0,210.1],'rvec':[0,0,0]}
+        self.engine.handle('routine',([['distance',100],['aruco',None],['wait',1]],85,'left',ref,1))
+        self.assertEqual((self.engine.routine_step,self.engine.routine_total),(2,3))
+        self.assertIsInstance(self.engine.primitive,ArucoRoutineBlock)
+        self.assertEqual(list(self.engine.routine),[('wait',1)])
+
+    def test_can_start_from_pick_after_an_earlier_aruco_step_without_camera(self):
+        self.engine.handle('routine',([['aruco',None],['pickup',None],['wait',1]],85,'left',None,1))
+        self.assertEqual((self.engine.routine_step,self.engine.routine_total),(2,3))
+        self.assertIsNotNone(self.engine.pickup_sequence)
+        self.assertEqual(list(self.engine.routine),[('wait',1)])
+        self.engine.robot.send.assert_called_once_with('ARM:112,111,161,90,125,75,3000\n')
+
+    def test_aruco_retry_window_expires_and_stop_clears_the_checkpoint(self):
+        e=self.engine
+        ref={'xyz_camera_mm':[0,0,210.1],'rvec':[0,0,0]}
+        e.handle('routine',([['aruco',None],['wait',1]],85,'left',ref))
+        now=time.monotonic()
+        e.pause_aruco_routine('ArUco 12 sin lectura válida.',now)
+        deadline=e.routine_retry_deadline
+        e.aruco_sample=dict(ref,id=12,captured_at=time.monotonic())
+        e.auto_retry_aruco_routine(deadline)
+        self.assertIsNone(e.routine_retry_at)
+        self.assertIsNotNone(e.routine_retry)
+        self.assertIsNone(e.primitive)
+        e.handle('stop',False)
+        self.assertIsNone(e.routine_retry)
+        self.assertIsNone(e.routine_retry_deadline)
+
+    def test_aligned_aruco_keeps_pick_queued_until_wheels_confirm_stop(self):
+        e=self.engine
+        now=time.monotonic()
+        ref={'xyz_camera_mm':[0,0,218.4],'rvec':[0,0,0],'target_distance_mm':218.4}
+        e.handle('routine',([['aruco',None],['pickup',None],['wait',1]],85,'left',ref))
+        for tick in range(1,5):
+            timestamp=now+tick*.05
+            e.aruco_sample=dict(ref,captured_at=timestamp,id=12)
+            e.primitive.output(e.odom,timestamp)
+        self.assertTrue(e.primitive.done)
+        e.primitive=None;e.next_step_at=now+.7
+        e.telemetry['pl']=6
+        e.start_next_routine_step(e.next_step_at)
+        self.assertEqual(list(e.routine),[('pickup',None),('wait',1)])
+        self.assertEqual(e.routine_step,1)
+        e.robot.send.assert_not_called()
+        e.telemetry['pl']=0
+        e.start_next_routine_step(e.next_step_at+.1)
+        self.assertEqual(e.routine_step,2)
+        self.assertEqual(list(e.routine),[('wait',1)])
+        e.robot.send.assert_called_once_with('ARM:112,111,161,90,125,75,3000\n')
+
+    def test_arm_pickup_release_and_aruco_retry_in_running_engine(self):
         class Link:
             def __init__(self):self.seq=0;self.target=[90,126,74,90,106,75];self.until=0;self.commands=[]
             def send(self,msg):
@@ -90,13 +143,23 @@ class RoutineBlockTests(unittest.TestCase):
                 deadline=time.monotonic()+12
                 while time.monotonic()<deadline:
                     e.post('heartbeat');time.sleep(.03)
-                    if e.robot.target[5]==75 and e.routine_step==3 and not e.routine_running and sum(m.startswith('ARM:') for m in e.robot.commands)==11:break
-                self.assertEqual(sum(m.startswith('ARM:') for m in e.robot.commands),11)
-                self.assertEqual(e.robot.target,[108,149,180,90,7,75])
+                    if e.routine_step==3 and not e.routine_running and sum(m.startswith('ARM:') for m in e.robot.commands)==10:break
+                handling_commands=[m for m in e.robot.commands if m.startswith('ARM:')][1:]
+                self.assertEqual(handling_commands,[
+                    'ARM:112,111,161,90,125,75,3000\n',
+                    'ARM:115,14,96,90,163,75,3000\n',
+                    'ARM:115,14,96,90,163,15,3000\n',
+                    'ARM:115,55,82,90,124,15,3000\n',
+                    'ARM:115,110,121,90,100,15,3000\n',
+                    'ARM:115,55,82,90,124,15,3000\n',
+                    'ARM:115,14,96,90,163,15,3000\n',
+                    'ARM:115,14,96,90,163,75,3000\n',
+                    'ARM:112,111,161,90,125,75,3000\n',
+                ])
                 self.assertEqual(e.routine_step,3)
                 self.assertFalse(e.routine_running)
             ref={'identity':{'url':'test'},'xyz_camera_mm':[0,0,180],'rvec':[0,0,0]}
-            e.post('routine',([['wait',.1],['aruco',None]],85,'left',ref))
+            e.post('routine',([['wait',.1],['aruco',None],['pickup',None],['wait',.1]],85,'left',ref))
             deadline=time.monotonic()+3
             while time.monotonic()<deadline:
                 e.post('heartbeat');time.sleep(.03)
@@ -104,5 +167,27 @@ class RoutineBlockTests(unittest.TestCase):
             self.assertIsInstance(e.primitive,ArucoRoutineBlock)
             self.assertTrue(e.routine_running)
             self.assertNotIn('STOP\n',e.robot.commands)
+            deadline=time.monotonic()+3
+            while time.monotonic()<deadline and e.routine_retry is None:
+                e.post('heartbeat');time.sleep(.03)
+            self.assertIsNotNone(e.routine_retry)
+            self.assertEqual((e.routine_step,e.sent_pwm),(2,(0,0)))
+            self.assertIn('STOP\n',e.robot.commands)
+            e.post('routine_retry')
+            time.sleep(.1)
+            self.assertIsNotNone(e.routine_retry)
+            self.assertFalse(e.routine_running)
+            rotated_pose=dict(ref,id=12,xyz_camera_mm=[0,2.6,210.1],rvec=[0,0,math.radians(92.9)])
+            with patch.object(PickupSequence, 'observe', accelerated):
+                deadline=time.monotonic()+8
+                while time.monotonic()<deadline:
+                    e.post('heartbeat')
+                    e.post('aruco_sample',dict(rotated_pose,captured_at=time.monotonic()))
+                    time.sleep(.06)
+                    if e.routine_step==4 and not e.routine_running:break
+            self.assertIsNone(e.routine_retry)
+            self.assertEqual(e.routine_step,4,e.test_result)
+            self.assertFalse(e.routine_running)
+            self.assertEqual(e.robot.target,[115,110,121,90,100,15])
         finally:
             e.quit=True;e.join(2)
