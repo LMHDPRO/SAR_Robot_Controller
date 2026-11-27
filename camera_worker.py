@@ -21,11 +21,33 @@ def load_calibration(path):
     return k,d,size
 
 
-def detect(frame,detector,marker_mm,calibration,contrast=None):
+def threshold_target(gray,detector,previous_box):
+    height,width=gray.shape
+    regions=[]
+    if previous_box is not None:
+        x,y,w,h=previous_box
+        margin=max(w,h)
+        regions.append((max(0,x-margin),max(0,y-margin),
+                        min(width,x+w+margin),min(height,y+h+margin)))
+    regions.append((0,0,width,height))
+    for left,top,right,bottom in regions:
+        region=gray[top:bottom,left:right]
+        if region.size==0:continue
+        _,binary=cv2.threshold(region,0,255,cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        corners,ids,_=detector.detectMarkers(binary)
+        if ids is not None and 12 in ids:
+            offset=np.array([left,top],dtype=np.float32)
+            return tuple(c+offset for c in corners),ids
+    return (),None
+
+
+def detect(frame,detector,marker_mm,calibration,contrast=None,previous_box=None):
     corners,ids,_=detector.detectMarkers(frame)
     if contrast is not None and (ids is None or 12 not in ids):
         gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
         enhanced_corners,enhanced_ids,_=detector.detectMarkers(contrast.apply(gray))
+        if enhanced_ids is None or 12 not in enhanced_ids:
+            enhanced_corners,enhanced_ids=threshold_target(gray,detector,previous_box)
         if enhanced_ids is not None and 12 in enhanced_ids:
             target_indices=np.flatnonzero(enhanced_ids.ravel()==12)
             corners=tuple(corners)+tuple(enhanced_corners[i] for i in target_indices)
@@ -36,6 +58,8 @@ def detect(frame,detector,marker_mm,calibration,contrast=None):
     cv2.aruco.drawDetectedMarkers(frame,corners,ids)
     for c,identifier in zip(corners,ids.reshape(-1)):
         row={'id':int(identifier),'center_px':np.mean(c.reshape(4,2),axis=0).tolist()}
+        if identifier==12:
+            row['bounds_px']=cv2.boundingRect(c)
         if calibration is not None:
             k,d,size=calibration
             h,w=frame.shape[:2]
@@ -73,17 +97,25 @@ def rotate_preview(frame,rotation,cv2_module=cv2):
     return cv2_module.rotate(frame,rotations[rotation]) if rotation in rotations else frame
 
 
+def create_detector(config):
+    dictionary=cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco,config['dictionary']))
+    parameters=cv2.aruco.DetectorParameters()
+    parameters.minMarkerPerimeterRate=0.015
+    parameters.cornerRefinementMethod=cv2.aruco.CORNER_REFINE_SUBPIX
+    if not config.get('arm_camera_api'):
+        # A nearby marker can have a wide, soft black border. Include larger
+        # neighborhoods so the adaptive threshold also samples its surroundings.
+        parameters.adaptiveThreshWinSizeMax=83
+    return cv2.aruco.ArucoDetector(dictionary,parameters)
+
+
 def run(config):
     calibration=load_calibration(config.get('calibration',''))
     marker_mm=float(config['marker_mm'])
     if not np.isfinite(marker_mm) or marker_mm<=0:raise ValueError('Tamaño de marcador inválido')
     rotation=int(config.get('rotation',0))
     if rotation not in (0,90,-90,180):raise ValueError('Rotación inválida: use 0, 90, -90 o 180 grados')
-    dictionary=cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco,config['dictionary']))
-    parameters=cv2.aruco.DetectorParameters()
-    parameters.minMarkerPerimeterRate=0.015
-    parameters.cornerRefinementMethod=cv2.aruco.CORNER_REFINE_SUBPIX
-    detector=cv2.aruco.ArucoDetector(dictionary,parameters)
+    detector=create_detector(config)
     contrast=None if config.get('arm_camera_api') else cv2.createCLAHE(clipLimit=2.0,tileGridSize=(8,8))
     source=config['url'].strip()
     if not config.get('arm_camera_api') and not source.startswith(('http://','https://','rtsp://')):
@@ -100,6 +132,8 @@ def run(config):
             if not cap.isOpened():raise RuntimeError('No se pudo abrir el stream de la ESP32-S3')
             cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
             emit({'status':'Cámara conectada; esperando imagen'})
+            previous_box=None
+            box_time=0.
             while True:
                 start=time.monotonic()
                 ok,frame=cap.read()
@@ -107,7 +141,15 @@ def run(config):
                 # This is the local read time, not the camera exposure time;
                 # ESP32/network/FFmpeg buffering latency is unknown here.
                 captured_at=time.monotonic()
-                rows=detect(frame,detector,marker_mm,calibration,contrast)
+                if captured_at-box_time>1.0:
+                    previous_box=None
+                rows=detect(frame,detector,marker_mm,calibration,contrast,previous_box)
+                targets=[row['bounds_px'] for row in rows if row['id']==12]
+                if len(targets)==1:
+                    previous_box=targets[0]
+                    box_time=captured_at
+                elif targets:
+                    previous_box=None
                 preview=rotate_preview(frame,rotation)
                 h,w=preview.shape[:2]
                 scale=min(1.0,640/max(w,h))

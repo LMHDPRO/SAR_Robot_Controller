@@ -65,7 +65,7 @@ class RoutineBlockTests(unittest.TestCase):
         self.assertEqual((self.engine.routine_step,self.engine.routine_total),(2,3))
         self.assertIsNotNone(self.engine.pickup_sequence)
         self.assertEqual(list(self.engine.routine),[('wait',1)])
-        self.engine.robot.send.assert_called_once_with('ARM:112,111,161,90,125,75,3000\n')
+        self.engine.robot.send.assert_called_once_with('ARM:115,149,180,90,7,75,3000\n')
 
     def test_aruco_retry_window_expires_and_stop_clears_the_checkpoint(self):
         e=self.engine
@@ -83,15 +83,15 @@ class RoutineBlockTests(unittest.TestCase):
         self.assertIsNone(e.routine_retry)
         self.assertIsNone(e.routine_retry_deadline)
 
-    def test_aligned_aruco_keeps_pick_queued_until_wheels_confirm_stop(self):
+    def test_close_aligned_aruco_keeps_pick_queued_until_wheels_confirm_stop(self):
         e=self.engine
         now=time.monotonic()
         ref={'xyz_camera_mm':[0,0,218.4],'rvec':[0,0,0],'target_distance_mm':218.4}
         e.handle('routine',([['aruco',None],['pickup',None],['wait',1]],85,'left',ref))
         for tick in range(1,5):
             timestamp=now+tick*.05
-            e.aruco_sample=dict(ref,captured_at=timestamp,id=12)
-            e.primitive.output(e.odom,timestamp)
+            e.aruco_sample=dict(ref,xyz_camera_mm=[0,0,210],captured_at=timestamp,id=12)
+            self.assertEqual(e.primitive.output(e.odom,timestamp),(0,0))
         self.assertTrue(e.primitive.done)
         e.primitive=None;e.next_step_at=now+.7
         e.telemetry['pl']=6
@@ -103,7 +103,7 @@ class RoutineBlockTests(unittest.TestCase):
         e.start_next_routine_step(e.next_step_at+.1)
         self.assertEqual(e.routine_step,2)
         self.assertEqual(list(e.routine),[('wait',1)])
-        e.robot.send.assert_called_once_with('ARM:112,111,161,90,125,75,3000\n')
+        e.robot.send.assert_called_once_with('ARM:115,149,180,90,7,75,3000\n')
 
     def test_arm_pickup_release_and_aruco_retry_in_running_engine(self):
         class Link:
@@ -143,18 +143,25 @@ class RoutineBlockTests(unittest.TestCase):
                 deadline=time.monotonic()+12
                 while time.monotonic()<deadline:
                     e.post('heartbeat');time.sleep(.03)
-                    if e.routine_step==3 and not e.routine_running and sum(m.startswith('ARM:') for m in e.robot.commands)==10:break
+                    if e.routine_step==3 and not e.routine_running and sum(m.startswith('ARM:') for m in e.robot.commands)==17:break
                 handling_commands=[m for m in e.robot.commands if m.startswith('ARM:')][1:]
                 self.assertEqual(handling_commands,[
-                    'ARM:112,111,161,90,125,75,3000\n',
+                    'ARM:115,149,180,90,7,75,3000\n',
+                    'ARM:115,110,180,90,7,75,3000\n',
+                    'ARM:115,98,180,90,61,75,3000\n',
+                    'ARM:115,95,180,90,83,75,3000\n',
+                    'ARM:115,86,180,90,114,75,3000\n',
+                    'ARM:115,74,180,90,144,75,3000\n',
+                    'ARM:115,43,151,90,177,75,3000\n',
+                    'ARM:115,34,124,90,158,75,3000\n',
                     'ARM:115,14,96,90,163,75,3000\n',
                     'ARM:115,14,96,90,163,15,3000\n',
                     'ARM:115,55,82,90,124,15,3000\n',
                     'ARM:115,110,121,90,100,15,3000\n',
-                    'ARM:115,55,82,90,124,15,3000\n',
-                    'ARM:115,14,96,90,163,15,3000\n',
-                    'ARM:115,14,96,90,163,75,3000\n',
-                    'ARM:112,111,161,90,125,75,3000\n',
+                    'ARM:120,55,82,90,124,15,3000\n',
+                    'ARM:120,14,96,90,163,15,3000\n',
+                    'ARM:120,14,96,90,163,75,3000\n',
+                    'ARM:120,111,161,90,125,75,3000\n',
                 ])
                 self.assertEqual(e.routine_step,3)
                 self.assertFalse(e.routine_running)
@@ -177,9 +184,9 @@ class RoutineBlockTests(unittest.TestCase):
             time.sleep(.1)
             self.assertIsNotNone(e.routine_retry)
             self.assertFalse(e.routine_running)
-            rotated_pose=dict(ref,id=12,xyz_camera_mm=[0,2.6,210.1],rvec=[0,0,math.radians(92.9)])
+            rotated_pose=dict(ref,id=12,xyz_camera_mm=[0,2.6,197.2],rvec=[0,0,math.radians(92.9)])
             with patch.object(PickupSequence, 'observe', accelerated):
-                deadline=time.monotonic()+8
+                deadline=time.monotonic()+14
                 while time.monotonic()<deadline:
                     e.post('heartbeat')
                     e.post('aruco_sample',dict(rotated_pose,captured_at=time.monotonic()))

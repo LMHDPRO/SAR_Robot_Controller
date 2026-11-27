@@ -11,7 +11,7 @@ from arm import ArmKinematics
 from defaults import RUNTIME_DEFAULTS, GEOMETRY_DEFAULTS, GRIPPER_MIN_DEG, GRIPPER_MAX_DEG
 from core import Wait, distance_scale, Geometry, Odometry, Primitive, SingleEncoderMove, HeadingHold, ImuTurn, WheelCapture, wheel_correction, validate_routine
 from aruco_alignment import ArucoAlignment
-from pickup_sequence import GRIPPER_HOLD_DEG, SAFE_RESCUE_ANGLES, PickupSequence, pickup_servo_target
+from pickup_sequence import GRIPPER_HOLD_DEG, ALIGNMENT_BASE_DEG, SAFE_RESCUE_ANGLES, PickupSequence, pickup_servo_target
 from routine_blocks import ArmRoutineBlock, ArucoMarkerUnavailable, ArucoRoutineBlock
 
 class Link:
@@ -447,7 +447,7 @@ class Engine(threading.Thread):
         if (sequence['seen_busy'] and not busy and now-sequence['started']>=3.0
                 and all(abs(float(a)-b)<=1 for a,b in zip(channels,[90,126,74,90,106,75]))):
             self.arm_approach=None
-            self.send_arm_pose([108.5,149.4,180,6.8],75,3000,self.sequence_owner,90)
+            self.send_arm_pose([ALIGNMENT_BASE_DEG,149.4,180,6.8],75,3000,self.sequence_owner,90)
             if self.collection_sequence is not None:
                 self.collection_sequence.update(stage='second',started=now,seen_busy=False)
             self.emit('Segunda etapa de aproximación enviada')
@@ -456,7 +456,7 @@ class Engine(threading.Thread):
         if sequence is None or sequence['stage']!='second':return
         if busy:sequence['seen_busy']=True
         if (sequence['seen_busy'] and not busy and now-sequence['started']>=3
-                and all(abs(float(a)-b)<=1 for a,b in zip(channels,[108,149,180,90,7,75]))):
+                and all(abs(float(a)-b)<=1 for a,b in zip(channels,[ALIGNMENT_BASE_DEG,149,180,90,7,75]))):
             reason=self.motion_block(self.sequence_owner)
             if reason:raise ValueError(reason)
             self.pick_after_alignment=True
@@ -664,10 +664,17 @@ class Engine(threading.Thread):
         elif k=='arm_approach':self.start_arm_approach()
         elif k=='power':
             if v and (self.estop_latched or self.telemetry.get('estop')==1):raise ValueError('Desbloquear E-STOP primero')
+            if v and (not self.robot or time.monotonic()-self.last_robot>=.5):
+                raise ValueError('POWER ON no enviado: espera telemetría reciente del AGV')
             if v and self.telemetry.get('protocol')!=1:raise ValueError('Cargar firmware SAR v1.0')
+            if v and self.telemetry.get('pwm_ok')==0:raise ValueError('POWER ON bloqueado: fallo de inicialización PWM')
+            if v and not self.telemetry.get('armed') and self.telemetry.get('pca_ready')==0:
+                raise ValueError('POWER ON bloqueado: el AGV reporta PCA9685 no disponible')
             self.halt(not v)
-            if v and self.robot and time.monotonic()-self.last_robot<0.5:
+            if v:
                 self.robot.send('POWER:1\n');self.stopped=False
+                self.emit('POWER ON: los relés ya figuraban ON. Home automático se aplica al pasar de OFF a ON.'
+                          if self.telemetry.get('armed') else 'POWER ON enviado; esperando que el AGV reporte los relés ON.')
         elif k=='manual':
             if v is None:self.halt()
             else:
@@ -1052,6 +1059,8 @@ class Engine(threading.Thread):
                                 self.reset_pending=False;self.estop_latched=False;self.emit('E-STOP desbloqueado; alimentación OFF')
                             if t.get('estop')==1 and not self.estop_latched:
                                 self.estop_latched=True;self.halt(True);self.emit('E-STOP activo en el AGV')
+                            if self.last_boot==t['boot_id'] and self.telemetry.get('armed')==0 and t['armed']==1:
+                                self.emit('POWER ON confirmado por el AGV: relés ON. Home de encendido sin sensor de posición.')
                             self.last_boot=t['boot_id'];self.last_robot=time.monotonic();self.telemetry=t
                             arm_channels=t.get('arm_angles')
                             if (isinstance(arm_channels,list) and len(arm_channels)==6
@@ -1753,6 +1762,10 @@ class Window(QtWidgets.QMainWindow):
         self.motor_status.setText(self.motor_status.text()+f" | v L/R: {s.get('vl',0)/10:.1f}/{s.get('vr',0)/10:.1f} cm/s\nE-STOP: {'ACTIVO' if s.get('estop_latched') else 'libre'} | Política confirmada: {t.get('cut_relays_on_loss','?')} | Datos: {s.get('age',0):.2f}s | Paso {s.get('routine_step',0)}/{s.get('routine_total',0)}\nI2C BNO:{bno_state} OLED:{component('oled_ready')} PCA9685:{component('pca_ready')} | TCP RX:{t.get('tcp_rx_frames','?')} TX:{t.get('tcp_tx_frames','?')}")
         imu=f"BNO055: {'DATA OK' if fresh and s['imu_valid'] else s['imu_reason']}\nHeading {heading:.1f}° | relative {s['imu_yaw']:+.1f}° | roll {t.get('roll',0):.1f}° pitch {t.get('pitch',0):.1f}°\nCalibration (info): {t.get('cs','?')}/{t.get('cg','?')}/{t.get('ca','?')}/{t.get('cm','?')} | address {hex(t.get('imu_addr',0))}\nTicks raw L/R: {t.get('tl','?')} / {t.get('tr','?')} | Vueltas IMU: {s['imu_yaw']/360:+.3f}"
         self.imu_info.setText(imu)
+        if fresh:
+            home_result={1:'verificado',0:'sin verificar',-1:'error de escritura o lectura'}.get(
+                t.get('home_pwm'),'el firmware no reporta el diagnóstico')
+            self.motor_status.setText(self.motor_status.text()+f' | PWM Home al encender: {home_result}')
         pca_status='OK' if fresh and t.get('pca_ready')==1 else 'ERR' if fresh and t.get('pca_ready')==0 else '?'
         arm_state='moviendo' if s.get('arm_busy') else 'en espera'
         arm_note=s.get('arm_error') or f'PCA9685 {pca_status} · pose de servos estimada · {arm_state}'

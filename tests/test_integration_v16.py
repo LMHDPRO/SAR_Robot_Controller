@@ -4,7 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import cv2
 import numpy as np
 from PySide6 import QtCore, QtWidgets
@@ -18,6 +18,29 @@ APP=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_manual_joint_pose_survives_power_off_then_sends_selected_target(self):
+        engine=Engine()
+        self.addCleanup(engine.pool.shutdown)
+        with patch.object(ArmWorkspace,'_load_vision_config'):
+            arm=ArmWorkspace(engine)
+        self.addCleanup(arm.deleteLater)
+        arm.timer.stop()
+        engine.robot=Mock()
+        engine.telemetry={'protocol':1,'arm_protocol':1,'pca_ready':1,'armed':0,'pwm_ok':1}
+        arm.state={'fresh':True,'arm_angles':engine.arm_angles.tolist()}
+        arm.fk_sliders[1].setValue(950)
+        engine.last_robot=time.monotonic()
+        arm.btn_send_manual.click()
+        self.assertTrue(engine.commands.empty())
+        self.assertEqual(arm.fk_sliders[1].value(),950)
+        engine.telemetry['armed']=1
+        engine.last_robot=time.monotonic()
+        arm.btn_send_manual.click()
+        kind,value,_=engine.commands.get_nowait()
+        engine.handle(kind,value)
+        command=engine.robot.send.call_args.args[0]
+        self.assertEqual(command.split(',')[1],'95')
+
     def test_quintic_home_preview_interpolates_and_stops_at_home(self):
         with patch.object(ArmWorkspace, '_load_vision_config'):
             arm = ArmWorkspace(Engine())

@@ -1,10 +1,26 @@
 """Supervised arm pickup: advance only after the firmware reports each target."""
 
 GRIPPER_HOLD_DEG = 15
-PICKUP_APPROACH_ANGLES = (111.7, 111.1, 160.6, 125.1)
-PICKUP_PICK_ANGLES = (115.2, 14.3, 95.8, 162.9)
-PICKUP_DEPART_ANGLES = (115.2, 55.2, 81.5, 123.6)
-SAFE_RESCUE_ANGLES = (115.2, 110.5, 121.2, 99.7)
+ALIGNMENT_BASE_DEG = 117
+PICKUP_BASE_DEG = 115
+RELEASE_APPROACH_ANGLES = (120, 111.1, 160.6, 125.1)
+RELEASE_PICK_ANGLES = (120, 14.3, 95.8, 162.9)
+RELEASE_DEPART_ANGLES = (120, 55.2, 81.5, 123.6)
+PICKUP_PICK_ANGLES = (PICKUP_BASE_DEG, *RELEASE_PICK_ANGLES[1:])
+PICKUP_DEPART_ANGLES = (PICKUP_BASE_DEG, *RELEASE_DEPART_ANGLES[1:])
+SAFE_RESCUE_ANGLES = (PICKUP_BASE_DEG, 110.5, 121.2, 99.7)
+# Servo waypoints for the folded descent and low insertion. The last two
+# insertion poses level the tool at the taught grasp height before seating it.
+PICKUP_ENTRY = (
+    ('Orientar base', (PICKUP_BASE_DEG, 149.4, 180, 6.8), 75),
+    ('Bajar con pinza recogida', (PICKUP_BASE_DEG, 110, 180, 7), 75),
+    ('Bajar a altura de recogida', (PICKUP_BASE_DEG, 98, 180, 61), 75),
+    ('Extender pinza', (PICKUP_BASE_DEG, 95, 180, 83), 75),
+    ('Extender a baja altura', (PICKUP_BASE_DEG, 86, 180, 114), 75),
+    ('Orientar muñeca', (PICKUP_BASE_DEG, 74, 180, 144), 75),
+    ('Nivelar pinza', (PICKUP_BASE_DEG, 43, 151, 177), 75),
+    ('Entrar bajo la pieza', (PICKUP_BASE_DEG, 34, 124, 158), 75),
+)
 PICKUP_SETTLE_SECONDS = {'PICK': 1, 'Cerrar pinza': 2, 'Abrir pinza': 2}
 
 
@@ -17,16 +33,16 @@ class PickupSequence:
     def __init__(self, now, release=False):
         self.release = release
         self.steps = [
-            ('Approach', PICKUP_APPROACH_ANGLES, 75),
+            *PICKUP_ENTRY,
             ('PICK', PICKUP_PICK_ANGLES, 75),
             ('Cerrar pinza', PICKUP_PICK_ANGLES, GRIPPER_HOLD_DEG),
             ('DEPART', PICKUP_DEPART_ANGLES, GRIPPER_HOLD_DEG),
             ('SAFE_Rescue', SAFE_RESCUE_ANGLES, GRIPPER_HOLD_DEG),
         ] if not release else [
-            ('DEPART', PICKUP_DEPART_ANGLES, GRIPPER_HOLD_DEG),
-            ('PICK', PICKUP_PICK_ANGLES, GRIPPER_HOLD_DEG),
-            ('Abrir pinza', PICKUP_PICK_ANGLES, 75),
-            ('Approach', PICKUP_APPROACH_ANGLES, 75),
+            ('DEPART', RELEASE_DEPART_ANGLES, GRIPPER_HOLD_DEG),
+            ('PICK', RELEASE_PICK_ANGLES, GRIPPER_HOLD_DEG),
+            ('Abrir pinza', RELEASE_PICK_ANGLES, 75),
+            ('Approach', RELEASE_APPROACH_ANGLES, 75),
         ]
         self.index = -1
         self.started = now

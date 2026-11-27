@@ -60,7 +60,7 @@ class AlignmentTests(unittest.TestCase):
         near.output(self.sample([-72.,40.,205.]),10.)
         self.assertAlmostEqual(near.until-10.,.10)
         arrival=ArucoAlignment(self.ref,10.,80)
-        target=(np.array(self.ref['xyz_camera_mm'])*210.1/np.linalg.norm(self.ref['xyz_camera_mm'])).tolist()
+        target=(np.array(self.ref['xyz_camera_mm'])*TARGET_DISTANCE_MM/np.linalg.norm(self.ref['xyz_camera_mm'])).tolist()
         for now in (10.,10.1,10.2,10.3):
             self.assertEqual(arrival.output(self.sample(target,now),now),(0,0))
         self.assertTrue(arrival.done)
@@ -183,9 +183,9 @@ class AlignmentTests(unittest.TestCase):
         self.assertIsNone(engine.aruco_alignment)
         second=engine.collection_sequence['started']
         engine.arm_busy=True
-        engine.update_collection_sequence([108,149,180,90,7,75],True,second+1)
+        engine.update_collection_sequence([117,149,180,90,7,75],True,second+1)
         engine.arm_busy=False
-        engine.update_collection_sequence([108,149,180,90,7,75],False,second+3.1)
+        engine.update_collection_sequence([117,149,180,90,7,75],False,second+3.1)
         self.assertIsNotNone(engine.aruco_alignment)
         self.assertIsNone(engine.aruco_sample)
         self.assertEqual(engine.aruco_alignment.output(None,second+3.2),(0,0))

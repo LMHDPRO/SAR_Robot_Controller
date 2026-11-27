@@ -6,8 +6,8 @@ import numpy as np
 # The stream has no camera exposure timestamp. Allow the reported ~1 s
 # pipeline delay to clear after motion before acting on another observation.
 ASSUMED_CAMERA_LATENCY_S = 1.0
-# Camera reading with the AGV at the 180 mm ruler-measured pickup position.
-TARGET_DISTANCE_MM = 210.1
+# Local estimate for 180 mm physical clearance: camera read 217.2 mm at 200 mm.
+TARGET_DISTANCE_MM = 197.2
 DISTANCE_TOLERANCE_MM = 5.0
 APPROACH_BEARING_TOLERANCE_DEG = 3.0
 FINAL_BEARING_TOLERANCE_DEG = 1.0
@@ -15,13 +15,14 @@ FINE_TURN_PULSE_S = 0.075
 
 
 class ArucoAlignment:
-    def __init__(self, reference, now, pwm, require_orientation=True, require_new_sample=False, *, allow_marker_quarter_turns=False):
+    def __init__(self, reference, now, pwm, require_orientation=True, require_new_sample=False, *, allow_marker_quarter_turns=False, accept_closer_distance=False):
         self.ref = reference
         self.target_distance_mm = float(reference.get('target_distance_mm', TARGET_DISTANCE_MM))
         if not 0 < self.target_distance_mm <= 600:
             raise ValueError('Distancia objetivo ArUco fuera de rango')
         self.require_orientation = require_orientation
         self.allow_marker_quarter_turns = allow_marker_quarter_turns
+        self.accept_closer_distance = accept_closer_distance
         self.minimum_sample_time=now if require_new_sample else now-.5
         self.started = now
         self.pwm = min(90, max(1, int(pwm)))
@@ -63,7 +64,9 @@ class ArucoAlignment:
         distance = float(np.linalg.norm(xyz))
         target = np.asarray(self.ref['xyz_camera_mm'], dtype=float)
         target_distance = self.target_distance_mm
-        if distance < target_distance-DISTANCE_TOLERANCE_MM: raise RuntimeError('Demasiado cerca del marcador; mueve el AGV manualmente')
+        too_close = distance < target_distance-DISTANCE_TOLERANCE_MM
+        if too_close and not self.accept_closer_distance:
+            raise RuntimeError(f'Demasiado cerca del marcador ({distance:.1f} mm de cámara, objetivo {target_distance:.1f} ± {DISTANCE_TOLERANCE_MM:g} mm); mueve el AGV manualmente')
         if distance > 600: raise RuntimeError('Marcador demasiado lejos para esta aproximación')
         if self.phase == 'forward':
             valid=(odom is not None and odom.imu_valid and odom.imu_segment==self.forward_segment
@@ -76,7 +79,7 @@ class ArucoAlignment:
             self.phase='settle';self.until=now+.25+ASSUMED_CAMERA_LATENCY_S
             return (0,0)
         if self.phase == 'pulse':
-            if now < self.until: return self.wheels
+            if now < self.until and not (too_close and self.wheels[0]==self.wheels[1]): return self.wheels
             self.phase = 'settle'; self.until = now+.25+ASSUMED_CAMERA_LATENCY_S
             return (0, 0)
         if self.phase == 'settle':

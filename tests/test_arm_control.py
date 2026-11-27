@@ -90,7 +90,7 @@ class ArmControlTests(unittest.TestCase):
         self.assertEqual(len(engine.robot.messages), 1)
         engine.update_arm_approach([90,126,74,90,106,75], True, start + 1)
         engine.update_arm_approach([90,126,74,90,106,75], False, start + 3.1)
-        self.assertEqual(engine.robot.messages[-1], 'ARM:108,149,180,90,7,75,3000\n')
+        self.assertEqual(engine.robot.messages[-1], 'ARM:117,149,180,90,7,75,3000\n')
         engine.handle('arm_approach', None)
         engine.handle('stop', False)
         engine.update_arm_approach([90,126,74,90,106,75], False, start + 4)

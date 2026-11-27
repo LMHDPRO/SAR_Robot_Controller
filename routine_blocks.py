@@ -36,7 +36,8 @@ class ArucoRoutineBlock:
     kind='aruco_block'
     def __init__(self,engine,reference,now):
         self.engine=engine;self.done=False
-        self.controller=ArucoAlignment(reference,now,engine.min_pwm,require_new_sample=True,allow_marker_quarter_turns=True)
+        self.controller=ArucoAlignment(reference,now,engine.min_pwm,require_new_sample=True,
+                                       allow_marker_quarter_turns=True,accept_closer_distance=True)
         self.engine.aruco_sample=None
     def output(self,odom,now):
         if not odom.imu_valid:raise RuntimeError('Bloque ArUco detenido: IMU no válida')

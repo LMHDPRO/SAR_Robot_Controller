@@ -124,7 +124,7 @@ class CameraPanel(QtWidgets.QGroupBox):
         if not self.arm_camera_api:
             calibrate=QtWidgets.QPushButton('Calibrar cámara AGV');calibrate.clicked.connect(self.calibrate_camera);advanced_layout.addWidget(calibrate)
             pose=QtWidgets.QPushButton('Colocar brazo en postura de aproximación')
-            pose.setToolTip('Primero postura ArUco; después base 108.5°, hombro 149.4°, codo 180°, muñeca 6.8° y pinza 75°.')
+            pose.setToolTip('Primero postura ArUco; después base 117°, hombro 149.4°, codo 180°, muñeca 6.8° y pinza 75°.')
             pose.clicked.connect(self.approach_pose_requested.emit);advanced_layout.addWidget(pose)
             teach=QtWidgets.QPushButton('Guardar referencia ArUco 12');teach.clicked.connect(self.save_reference);advanced_layout.addWidget(teach)
             alignment=QtWidgets.QHBoxLayout();box.addLayout(alignment)
@@ -132,7 +132,7 @@ class CameraPanel(QtWidgets.QGroupBox):
             resume=QtWidgets.QPushButton('Continuar alineación');resume.clicked.connect(self.continue_alignment);alignment.addWidget(resume)
             stop_alignment=QtWidgets.QPushButton('STOP AGV');stop_alignment.clicked.connect(self.alignment_stop.emit);alignment.addWidget(stop_alignment)
             pickup=QtWidgets.QPushButton('PICK');pickup.clicked.connect(self.pickup_requested.emit);box.addWidget(pickup)
-            pickup.setToolTip('Approach → PICK → cerrar pinza → DEPART → SAFE_Rescue. Verifica primero la distancia y el recorrido del brazo.')
+            pickup.setToolTip('Base a 115° → descenso con pinza recogida → entrada horizontal → PICK → cerrar pinza → DEPART → SAFE_Rescue.')
             release=QtWidgets.QPushButton('UNPICK');release.clicked.connect(self.release_requested.emit);box.addWidget(release)
             release.setToolTip('SAFE_Rescue → DEPART → PICK → abrir pinza → Approach.')
             message=('Referencia guardada disponible; conecta la cámara para comprobarla.' if self.reference_path.is_file()

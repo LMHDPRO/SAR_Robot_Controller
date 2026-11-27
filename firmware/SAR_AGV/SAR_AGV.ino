@@ -36,6 +36,10 @@ constexpr float ARM_POWER_POSE[ARM_SERVO_COUNT]={108.5f,149.5f,180.0f,90.0f,90.0
 float armAngles[ARM_SERVO_COUNT];
 float armStart[ARM_SERVO_COUNT],armTarget[ARM_SERVO_COUNT];
 bool armMoving=false;
+bool powerHomePending=false;
+int powerHomeResult=0; // Most recent power-on PWM check: pending/unverified, OK, or -1 on error.
+uint32_t powerRelayOnAt=0;
+constexpr uint32_t RELAY_SETTLE_MS=100;
 bool armQuintic=false;
 uint32_t armStartedAt=0,armDurationMs=0,lastArmWrite=0;
 uint32_t tcpRxFrames=0,tcpTxFrames=0,lastDisplay=0;
@@ -70,12 +74,13 @@ int angleToUs(uint8_t channel,float angle){
   angle=channel==5?constrain(angle,static_cast<float>(GRIPPER_MIN_DEG),static_cast<float>(GRIPPER_MAX_DEG)):constrain(angle,0.0f,180.0f);
   return lroundf(600.0f+10.0f*angle);
 }
-void writeArmAngles(){
-  if(!pcaReady)return;
+bool writeArmAngles(){
+  if(!pcaReady)return false;
   for(uint8_t channel=0;channel<ARM_SERVO_COUNT;channel++){
     int us=angleToUs(channel,armAngles[channel]);
-    pca.setPWM(channel,0,usToTicks(us));
+    if(pca.setPWM(channel,0,usToTicks(us))!=0)return false;
   }
+  return true;
 }
 void updateArmMotion(uint32_t now){
   if(!armMoving||!pcaReady||now-lastArmWrite<20)return;
@@ -94,12 +99,14 @@ void updateArmMotion(uint32_t now){
   if(elapsed>=armDurationMs)armMoving=false;
 }
 void stopArmMotion(){
+  powerHomePending=false;
   updateArmMotion(millis());
   armMoving=false;
   for(uint8_t channel=0;channel<ARM_SERVO_COUNT;channel++)
     armStart[channel]=armTarget[channel]=armAngles[channel];
 }
 void startArmMotion(const int* requested,uint32_t duration,uint32_t now,bool quintic){
+  powerHomePending=false;
   updateArmMotion(now);
   for(uint8_t channel=0;channel<ARM_SERVO_COUNT;channel++){
     armStart[channel]=armAngles[channel];
@@ -112,7 +119,8 @@ bool imuReady(){
 }
 bool initPca(){
   if(!i2cPresent(PCA_ADDR))return false;
-  pca.begin();pca.setPWMFreq(50);
+  if(!pca.begin())return false;
+  pca.setPWMFreq(50);
   return true;
 }
 bool initOled(){
@@ -187,9 +195,12 @@ void parseCommand(){
     halt(false);
     if(!armed){
       if(!pcaReady)return;
+      powerHomeResult=0;
       memcpy(armAngles,ARM_POWER_POSE,sizeof armAngles);
-      writeArmAngles();
+      if(!writeArmAngles()){powerHomeResult=-1;pcaReady=false;return;}
       relays(true);
+      powerRelayOnAt=millis();
+      powerHomePending=true;
     }
     armed=true;timeoutActive=false;lastCommand=millis();return;
   }
@@ -255,6 +266,21 @@ void loop(){
   while(pc&&pc.available()&&budget-->0){char c=pc.read();if(c=='\n'||c=='\r'){if(!overflow&&ri){rx[ri]=0;++tcpRxFrames;parseCommand();}ri=0;overflow=false;}else if(!overflow){if(ri<sizeof(rx)-1)rx[ri++]=c;else{overflow=true;halt(false);}}}
   now=millis();
   if(armed&&now-lastCommand>WATCHDOG_MS){halt(cutRelaysOnLoss);timeoutActive=true;}
+  if(powerHomePending && now-powerRelayOnAt>=RELAY_SETTLE_MS){
+    powerHomePending=false;
+    // Relay switching can reset PCA registers even when its I2C address responds.
+    if(pcaReady)pca.setPWMFreq(50);
+    bool verified=writeArmAngles();
+    for(uint8_t ch=0;verified && ch<ARM_SERVO_COUNT;ch++){
+      verified=pca.getPWM(ch)==0 && pca.getPWM(ch,true)==usToTicks(angleToUs(ch,ARM_POWER_POSE[ch]));
+    }
+    powerHomeResult=verified?1:-1;
+    if(!verified){
+      halt(true);
+      pcaReady=false;
+      Serial.println("POWER ON: fallo al verificar PWM de Home; reles OFF");
+    }else Serial.println("POWER ON: PWM de Home verificado en los seis canales");
+  }
   updateArmMotion(now);
   if(now-lastRamp>=10){lastRamp=now;motorOutputs(armed&&!estopLatched?ramp(actualL,demandL):0,armed&&!estopLatched?ramp(actualR,demandR):0);}
   // Retry detection only while motor outputs are stopped.
@@ -292,12 +318,12 @@ void loop(){
         "\"tl\":%ld,\"tr\":%ld,\"pl\":%d,\"pr\":%d,\"armed\":%d,\"estop\":%d,\"pwm_ok\":%d,"
         "\"imu\":%d,\"imu_addr\":%d,\"heading_relative\":%.2f,\"heading\":%.2f,\"roll\":%.2f,\"pitch\":%.2f,"
         "\"imu_age_ms\":%lu,\"imu_read_ok\":%d,\"oled_ready\":%d,\"pca_ready\":%d,\"arm_protocol\":%u,"
-        "\"arm_quintic\":1,\"arm_gripper_min\":%d,\"arm_busy\":%d,\"arm_angles\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+        "\"arm_quintic\":1,\"home_pwm\":%d,\"arm_gripper_min\":%d,\"arm_busy\":%d,\"arm_angles\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
         "\"tcp_rx_frames\":%lu,\"tcp_tx_frames\":%lu,\"cs\":%d,\"cg\":%d,\"ca\":%d,\"cm\":%d}\n",
         cutRelaysOnLoss,ESTOP_PIN<0?-1:(emergencyActive()?1:0),(unsigned long)bootId,(unsigned long)++seq,
         (unsigned long)now,(long)l,(long)r,actualL,actualR,armed,estopLatched?1:0,pwmOK,bno!=nullptr,
         bno?(bno==&imu29?41:40):0,relativeHeading,heading,rollDeg,pitchDeg,(unsigned long)(millis()-imuReadAt),
-        imuReadOK,oledReady,pcaReady,(unsigned int)ARM_PROTOCOL,GRIPPER_MIN_DEG,armMoving,armAngles[0],armAngles[1],armAngles[2],
+        imuReadOK,oledReady,pcaReady,(unsigned int)ARM_PROTOCOL,powerHomeResult,GRIPPER_MIN_DEG,armMoving,armAngles[0],armAngles[1],armAngles[2],
         armAngles[3],armAngles[4],armAngles[5],(unsigned long)tcpRxFrames,(unsigned long)tcpTxFrames,cs,cg,ca,cm);
       if(tn>=sizeof(tx)){disconnectPC();return;}to=0;txAt=millis();
     }

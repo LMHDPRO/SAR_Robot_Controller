@@ -188,9 +188,13 @@ class ArmWorkspace(MainWindow):
             self._show_msg('Desactiva Live Robot Arm movement para enviar una pose de prueba.',True);return
         reason=self.block_reason()
         if reason:
-            self.cancel_motion();self._show_msg(reason,True);return
+            if live_mode or self.path_active:self.cancel_motion()
+            self._show_msg(reason,True);return
         grip=float(self.slider_pinza.value())
-        self.engine.post('arm_stream_pose' if live_mode else 'arm_pose',(self.current_physical_angles.copy(),grip,150 if live_mode else 2000))
+        angles=self.current_physical_angles
+        if not live_mode and self.mode_selector.currentIndex()==0 and not self.path_active:
+            angles=self.slider_target_fk
+        self.engine.post('arm_stream_pose' if live_mode else 'arm_pose',(angles.copy(),grip,150 if live_mode else 2000))
         if not live_mode:self._show_msg('Pose enviada a la cola SAR; confirmar estado del firmware en la barra global.')
 
     def _control_loop_tick(self):

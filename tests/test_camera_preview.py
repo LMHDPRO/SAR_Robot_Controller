@@ -11,7 +11,7 @@ import numpy as np
 from PySide6 import QtGui, QtWidgets
 from app import Engine, Window
 from arm_workspace import ArmWorkspace
-from camera_worker import detect, rotate_preview, run as run_camera_worker
+from camera_worker import create_detector, detect, rotate_preview, run as run_camera_worker
 from cameras import CameraPanel
 from robotarm_v7 import VisionThread
 
@@ -96,10 +96,7 @@ class CameraPreviewTests(unittest.TestCase):
 
     def test_contrast_fallback_recovers_low_contrast_marker_with_valid_pose(self):
         dictionary=cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
-        parameters=cv2.aruco.DetectorParameters()
-        parameters.minMarkerPerimeterRate=.015
-        parameters.cornerRefinementMethod=cv2.aruco.CORNER_REFINE_SUBPIX
-        detector=cv2.aruco.ArucoDetector(dictionary,parameters)
+        detector=create_detector({'dictionary':'DICT_6X6_250'})
         marker=cv2.aruco.generateImageMarker(dictionary,12,48)
         frame=np.full((480,640,3),150,np.uint8)
         frame[188:236,284:332]=np.where(marker[...,None],150,137)
@@ -109,6 +106,37 @@ class CameraPreviewTests(unittest.TestCase):
         self.assertEqual([row['id'] for row in rows],[12])
         self.assertIn('distance_mm',rows[0])
         self.assertLessEqual(rows[0]['reprojection_px'],3.)
+
+    def test_nearby_soft_marker_has_valid_distance(self):
+        detector=create_detector({'dictionary':'DICT_6X6_250'})
+        dictionary=cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+        marker=cv2.aruco.generateImageMarker(dictionary,12,144)
+        gray=np.full((480,640),150,np.uint8)
+        gray[60:204,100:244]=np.where(marker,150,130)
+        frame=cv2.cvtColor(cv2.GaussianBlur(gray,(0,0),4),cv2.COLOR_GRAY2BGR)
+        calibration=(np.array([[600.,0.,320.],[0.,600.,240.],[0.,0.,1.]]),np.zeros(5),[640,480])
+        rows=detect(frame,detector,30,calibration,cv2.createCLAHE(2.,(8,8)))
+        self.assertEqual([row['id'] for row in rows],[12])
+        self.assertAlmostEqual(rows[0]['xyz_camera_mm'][2],600*30/144,delta=6)
+
+    def test_moving_marker_against_backlight_uses_current_image(self):
+        dictionary=cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+        detector=create_detector({'dictionary':'DICT_6X6_250'})
+        gray=np.full((480,640),150,np.uint8)
+        gray[:,:110]=255
+        gray[:,450:]=25
+        gray[180:276,220:316]=np.where(cv2.aruco.generateImageMarker(dictionary,12,96),150,90)
+        blurred=cv2.blur(gray,(17,3))
+        jpeg=cv2.imencode('.jpg',blurred,[cv2.IMWRITE_JPEG_QUALITY,75])[1]
+        frame=cv2.imdecode(jpeg,cv2.IMREAD_COLOR)
+        calibration=(np.array([[600.,0.,320.],[0.,600.,240.],[0.,0.,1.]]),np.zeros(5),[640,480])
+        contrast=cv2.createCLAHE(2.,(8,8))
+        previous_box=(225,180,88,88)
+        rows=detect(frame,detector,30,calibration,contrast,previous_box)
+        self.assertEqual([row['id'] for row in rows],[12])
+        np.testing.assert_allclose(rows[0]['center_px'],[267.5,227.5],atol=2)
+        self.assertAlmostEqual(rows[0]['xyz_camera_mm'][2],600*30/96,delta=7)
+        self.assertEqual(detect(np.zeros_like(frame),detector,30,calibration,contrast,previous_box),[])
 
     def test_camera_worker_retries_a_lost_stream(self):
         first=Mock()
